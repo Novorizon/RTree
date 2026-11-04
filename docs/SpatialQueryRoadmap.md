@@ -1,8 +1,12 @@
 # 3D 场景查询树规划
 
-本文件规划 RTree 完成后的扩展方向，不包含其他树的实现。现有 RTree 作为
-正确性与性能比较基线，保留其公开 API。实现顺序按场景价值和可验证性排列，
-不预设某一种树或非托管后端普遍更快。
+本文件保留 RTree 完成后的扩展路线与验收依据。阶段 0–3 的 CPU 索引已落地：
+共同几何/查询接口、RTree 适配、动态 AABB BVH、静态/三角形 SAH BVH、loose
+octree 和点 KD-tree，并验证了两层场景组合。API 与语义见
+[SpatialQueries](SpatialQueries.md)，性能见
+[SpatialPerformance](../validation/SpatialPerformance/README.md)。
+现有 RTree 仍是比较基线，保留其公开 API；LBVH/HLBVH、GPU、BSP/SVO 等
+属于后续按需求推进的方向，不预设某一种树或后端普遍更快。
 
 ## 当前基线
 

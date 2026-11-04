@@ -153,6 +153,20 @@ sizes and checksums. See [benchmark instructions and results](validation/Perform
 
 ## Additional 3D query indexes
 
-The [3D spatial-query roadmap](docs/SpatialQueryRoadmap.md) plans dynamic AABB
-BVHs, static SAH BVHs, loose octrees, point KD-trees, and later workload-specific
-indexes. It defines common query semantics, validation, and implementation stages.
+The CPU library now includes `DynamicAabbTree<T>`, `StaticBvh<T>`,
+`TriangleBvh<T>`, `LooseOctree<T>`, and `KdTree<T>`. RTree also implements their
+common bounds and ray interfaces. See [API examples and query semantics](docs/SpatialQueries.md)
+and [cross-index benchmarks](validation/SpatialPerformance/README.md).
+
+Dynamic proxies support generation handles and movement; static/triangle BVHs
+support source-order refit; the point KD-tree supports sorted radius and exact-k
+nearest queries. All support concurrent readers and caller-owned buffers.
+Triangle intersection uses an adaptive exact fallback for difficult numeric
+boundaries; that fallback can allocate, unlike the ordinary warmed fast path.
+
+```sh
+dotnet run --project validation/SpatialCorrectness/SpatialCorrectness.csproj -c Release
+```
+
+The [3D spatial-query roadmap](docs/SpatialQueryRoadmap.md) records the completed
+CPU stages and the remaining workload-specific LBVH/GPU/voxel directions.

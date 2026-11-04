@@ -19,6 +19,9 @@ namespace RTree
         internal int stackCount;
         internal HeapEntry[] heap = new HeapEntry[32];
         internal int heapCount;
+        internal int[] candidates = new int[16];
+        internal DistanceKey[] candidateDistances = new DistanceKey[16];
+        internal int candidateCount;
         private int busy;
 
         public QueryContext() : this(false) { }
@@ -31,6 +34,7 @@ namespace RTree
         public bool CollectStatistics { get; private set; }
         public long NodesVisited { get; internal set; }
         public long EntriesTested { get; internal set; }
+        public long PrimitiveTests { get; internal set; }
         public int ResultCount { get; internal set; }
 
         internal void Enter()
@@ -39,8 +43,10 @@ namespace RTree
                 throw new InvalidOperationException("A QueryContext cannot be used by concurrent queries.");
             stackCount = 0;
             heapCount = 0;
+            candidateCount = 0;
             NodesVisited = 0;
             EntriesTested = 0;
+            PrimitiveTests = 0;
             ResultCount = 0;
         }
 
@@ -48,6 +54,7 @@ namespace RTree
         {
             stackCount = 0;
             heapCount = 0;
+            candidateCount = 0;
             Interlocked.Exchange(ref busy, 0);
         }
 
@@ -58,6 +65,14 @@ namespace RTree
         }
 
         internal int Pop() { return stack[--stackCount]; }
+
+        internal void EnsureCandidates(int capacity)
+        {
+            if (capacity <= candidates.Length) return;
+            int size = Math.Max(capacity, checked(candidates.Length * 2));
+            Array.Resize(ref candidates, size);
+            Array.Resize(ref candidateDistances, size);
+        }
 
         internal void Push(int nodeId, DistanceKey distance)
         {

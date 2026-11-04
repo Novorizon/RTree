@@ -56,9 +56,13 @@ namespace RTree
         private int QueryRange(Rectangle rectangle, List<T> results, QueryContext context, bool containedOnly)
         {
             if (rectangle == null) throw new ArgumentNullException("rectangle");
+            return QueryRangeValue(Aabb.FromRectangle(rectangle), results, context, containedOnly);
+        }
+
+        private int QueryRangeValue(Aabb query, List<T> results, QueryContext context, bool containedOnly)
+        {
             if (results == null) throw new ArgumentNullException("results");
             if (context == null) throw new ArgumentNullException("context");
-            Aabb query = Aabb.FromRectangle(rectangle);
             context.Enter();
             try
             {
@@ -86,7 +90,7 @@ namespace RTree
                                 TreeEntry entry = entries[offset + i];
                                 if (!accepted)
                                 {
-                                    if (statistics) context.EntriesTested++;
+                                    if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
                                     if (containedOnly ? !query.Contains(entry.Bounds) : !query.Intersects(entry.Bounds)) continue;
                                 }
                                 results.Add(itemValues[entry.Id]);
@@ -155,7 +159,11 @@ namespace RTree
                         for (int i = 0; i < node.Count; i++)
                         {
                             TreeEntry entry = entries[offset + i];
-                            if (statistics) context.EntriesTested++;
+                            if (statistics)
+                            {
+                                context.EntriesTested++;
+                                if (node.Level == 1) context.PrimitiveTests++;
+                            }
                             DistanceKey distance = entry.Bounds.Distance(x, y, z);
                             int comparison = distance.CompareTo(limit);
                             if (comparison > 0) continue;
