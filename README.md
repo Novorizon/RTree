@@ -150,3 +150,9 @@ timing. Compare the same allocating API with its pre-optimization source first;
 reused-buffer, STR/fanout, and concurrent workloads are reported separately.
 Reports include allocations, retained-memory estimates, node visits, result
 sizes and checksums. See [benchmark instructions and results](validation/Performance/README.md).
+
+## Additional 3D query indexes
+
+The [3D spatial-query roadmap](docs/SpatialQueryRoadmap.md) plans dynamic AABB
+BVHs, static SAH BVHs, loose octrees, point KD-trees, and later workload-specific
+indexes. It defines common query semantics, validation, and implementation stages.
