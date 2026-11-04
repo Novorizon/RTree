@@ -81,12 +81,21 @@ namespace RTree
         {
             for (int i = 0; i < entryCount; i++)
             {
-                if (id == ids[i] && r.Equals(entries[i]))
+                if (id == ids[i] && sameBounds(r, entries[i]))
                 {
                     return i;
                 }
             }
             return -1;
+        }
+
+        private static bool sameBounds(Rectangle left, Rectangle right)
+        {
+            // Rectangle subclasses may define their own object equality. The
+            // index matches geometric bounds, including copies stored as base boxes.
+            for (int d = 0; d < Rectangle.DIMENSIONS; d++)
+                if (left.min[d] != right.min[d] || left.max[d] != right.max[d]) return false;
+            return true;
         }
 
         // delete entry. This is done by setting it to null and copying the last entry into its space.
@@ -101,21 +110,23 @@ namespace RTree
                 ids[i] = ids[lastIndex];
                 entries[lastIndex] = null;
             }
+            ids[lastIndex] = 0;
             entryCount--;
 
-            // if there are at least minNodeEntries, adjust the MBR.
-            // otherwise, don't bother, as the Node<T> will be 
-            // eliminated anyway.
-            if (entryCount >= minNodeEntries)
-            {
-                recalculateMBR(deletedRectangle);
-            }
+            // The root may remain below the minimum occupancy. Keep every
+            // surviving node's bounds tight, including an empty root.
+            recalculateMBR(deletedRectangle);
         }
 
         // oldRectangle is a rectangle that has just been deleted or made smaller.
         // Thus, the MBR is only recalculated if the OldRectangle influenced the old MBR
         internal void recalculateMBR(Rectangle deletedRectangle)
         {
+            if (entryCount == 0)
+            {
+                mbr = null;
+                return;
+            }
             if (mbr.edgeOverlaps(deletedRectangle))
             {
                 mbr.set(entries[0].min, entries[0].max);

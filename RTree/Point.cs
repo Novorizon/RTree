@@ -51,6 +51,9 @@ namespace RTree
         /// <param name="z">The z coordinate of the point</param>
         public Point(double x, double y, double z)
         {
+            Rectangle.ValidateCoordinate(x, "x");
+            Rectangle.ValidateCoordinate(y, "y");
+            Rectangle.ValidateCoordinate(z, "z");
             coordinates = new double[DIMENSIONS];
             coordinates[0] = x;
             coordinates[1] = y;

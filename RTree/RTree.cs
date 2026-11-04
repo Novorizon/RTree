@@ -21,7 +21,6 @@
 //  Updated by Boris Kudryashov, January 29, 2014
 using System.Collections.Generic;
 using System;
-using System.Collections;
 
 
 namespace RTree
@@ -38,9 +37,8 @@ namespace RTree
     /// Fast add performance.
     ///
     ///
-    /// The main reason for the high speed of this RTree implementation is the 
-    /// avoidance of the creation of unnecessary objects, mainly achieved by using
-    /// primitive collections from the trove4j library.
+    /// Items must be unique and retain stable equality and hash codes while
+    /// indexed. Access to an instance must be externally synchronized.
     /// author aled@sourceforge.net
     /// version 1.0b2p1
     /// Ported to C# By Dror Gluska, April 9th, 2009
@@ -84,9 +82,7 @@ namespace RTree
         //private int highestUsedNodeId = rootNodeId; 
         private int highestUsedNodeId = 0;
 
-        // Deleted Node&lt;T&gt; objects are retained in the nodeMap, 
-        // so that they can be reused. Store the IDs of nodes
-        // which can be reused.
+        // Retired nodes are removed from nodeMap; only their IDs are reused.
         //private TIntStack deletedNodeIds = new TIntStack();
         private Stack<int> deletedNodeIds = new Stack<int>();
 
@@ -99,10 +95,10 @@ namespace RTree
         //possibility to change the code to support objects without dictionaries.
         private Dictionary<int, T> IdsToItems = new Dictionary<int,T>();
         private Dictionary<T,int> ItemsToIds = new Dictionary<T,int>();
-        private volatile int idcounter = int.MinValue;
+        private int idcounter = int.MinValue;
 
         //the recursion methods require a delegate to retrieve data
-        private delegate void intproc(int x);
+        private delegate void IntProcedure(int x);
 
         /// <summary>
         /// Initialize implementation dependent properties of the RTree.
@@ -163,19 +159,38 @@ namespace RTree
         }
 
         /// <summary>
-        /// Adds an item to the spatial index
+        /// Adds a unique, non-null item to the spatial index.
         /// </summary>
         /// <param name="r"></param>
         /// <param name="item"></param>
         public void Add(Rectangle r, T item)
         {
-            idcounter++;
+            if (r == null) throw new ArgumentNullException("r");
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
+            if (ItemsToIds.ContainsKey(item))
+                throw new ArgumentException("The item is already indexed.", "item");
+            if (msize == int.MaxValue)
+                throw new InvalidOperationException("The index has reached its maximum item count.");
+
+            // Find a free ID even after the counter wraps during long-lived churn.
             int id = idcounter;
+            do { id = unchecked(id + 1); } while (IdsToItems.ContainsKey(id));
 
-            IdsToItems.Add(id, item);
+            // Dictionary operations involving user-defined equality run before
+            // the tree is changed. Failed additions must not leave orphan maps.
             ItemsToIds.Add(item, id);
-
-            add(r, id);
+            try
+            {
+                IdsToItems.Add(id, item);
+                add(r, id);
+                idcounter = id;
+            }
+            catch
+            {
+                IdsToItems.Remove(id);
+                ItemsToIds.Remove(item);
+                throw;
+            }
         }
 
         private void add(Rectangle r, int id)
@@ -239,7 +254,10 @@ namespace RTree
         /// <returns></returns>
         public bool Delete(Rectangle r, T item)
         {
-            int id = ItemsToIds[item];
+            if (r == null) throw new ArgumentNullException("r");
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
+            int id;
+            if (!ItemsToIds.TryGetValue(item, out id)) return false;
 
             bool success = delete(r, id);
             if (success == true)
@@ -317,23 +335,34 @@ namespace RTree
             Node<T> root = getNode(rootNodeId);
             while (root.entryCount == 1 && treeHeight > 1)
             {
-                root.entryCount = 0;
+                int retiredRootId = rootNodeId;
                 rootNodeId = root.ids[0];
                 treeHeight--;
+                releaseNode(retiredRootId);
                 root = getNode(rootNodeId);
+            }
+            if (root.entryCount == 0)
+            {
+                root.mbr = null;
+                root.level = 1;
+                treeHeight = 1;
             }
 
             return (foundIndex != -1);
         }
 
         /// <summary>
-        /// Retrieve nearest items to a point in radius furthestDistance
+        /// Returns all items tied for the nearest distance to p, provided that
+        /// distance is at most furthestDistance. This is not a radius query.
         /// </summary>
         /// <param name="p">Point of origin</param>
         /// <param name="furthestDistance">maximum distance</param>
         /// <returns>List of items</returns>
         public List<T> Nearest(Point p, double furthestDistance)
         {
+            if (p == null) throw new ArgumentNullException("p");
+            if (double.IsNaN(furthestDistance) || furthestDistance < 0)
+                throw new ArgumentOutOfRangeException("furthestDistance");
             List<T> retval = new List<T>();
             nearest(p, delegate(int id)
             {
@@ -343,11 +372,15 @@ namespace RTree
         }
 
 
-        private void nearest(Point p, intproc v, double furthestDistance)
+        private void nearest(Point p, IntProcedure v, double furthestDistance)
         {
             Node<T> rootNode = getNode(rootNodeId);
 
-            nearest(p, rootNode, furthestDistance);
+            NearestDistance limit;
+            if (double.IsPositiveInfinity(furthestDistance)) limit = new NearestDistance(0, 3);
+            else if (furthestDistance < MinimumNormalDistance) limit = new NearestDistance(furthestDistance * SmallDistanceScale, 0);
+            else limit = new NearestDistance(furthestDistance, 1);
+            nearest(p, rootNode, limit);
 
             foreach (int id in nearestIds)
                 v(id);
@@ -361,6 +394,7 @@ namespace RTree
         /// <returns></returns>
         public List<T> Intersects(Rectangle r)
         {
+            if (r == null) throw new ArgumentNullException("r");
             List<T> retval = new List<T>();
             intersects(r, delegate(int id)
             {
@@ -370,7 +404,7 @@ namespace RTree
         }
 
 
-        private void intersects(Rectangle r, intproc v)
+        private void intersects(Rectangle r, IntProcedure v)
         {
             Node<T> rootNode = getNode(rootNodeId);
             intersects(r, v, rootNode);
@@ -383,6 +417,7 @@ namespace RTree
         /// <returns></returns>
         public List<T> Contains(Rectangle r)
         {
+            if (r == null) throw new ArgumentNullException("r");
             List<T> retval = new List<T>();
             contains(r, delegate(int id)
             {
@@ -392,7 +427,7 @@ namespace RTree
             return retval;
         }
 
-        private void contains(Rectangle r, intproc v)
+        private void contains(Rectangle r, IntProcedure v)
         {
             // find all rectangles in the tree that are contained by the passed rectangle
             // written to be non-recursive (should model other searches on this?)
@@ -495,6 +530,12 @@ namespace RTree
             return nextNodeId;
         }
 
+        private void releaseNode(int nodeId)
+        {
+            nodeMap.Remove(nodeId);
+            deletedNodeIds.Push(nodeId);
+        }
+
        
        
        
@@ -541,9 +582,6 @@ namespace RTree
             // choose two entries to be the first elements of the groups. Assign
             // each to a group.
 
-            // debug code
-            double initialArea = 0;
-            
             System.Array.Copy(initialEntryStatus, 0, entryStatus, 0, maxNodeEntries);
 
             Node<T> newNode = null;
@@ -608,12 +646,11 @@ namespace RTree
         /// <param name="newNode"></param>
         private void pickSeeds(Node<T> n, Rectangle newRect, int newId, Node<T> newNode)
         {
-            // Find extreme rectangles along all dimension. Along each dimension,
-            // find the entry whose rectangle has the highest low side, and the one 
-            // with the lowest high side. Record the separation.
-            double maxNormalizedSeparation = 0;
+            // Linear seeds: choose the most separated pair along any axis.
+            // Track second choices so overlapping boxes still yield distinct seeds.
+            double maxNormalizedSeparation = double.NegativeInfinity;
             int highestLowIndex = 0;
-            int lowestHighIndex = 0;
+            int lowestHighIndex = 1;
 
             // for the purposes of picking seeds, take the MBR of the Node&lt;T&gt; to include
             // the new rectangle aswell.
@@ -621,43 +658,52 @@ namespace RTree
 
             for (int d = 0; d < Rectangle.DIMENSIONS; d++)
             {
-                double tempHighestLow = newRect.min[d];
-                int tempHighestLowIndex = -1; // -1 indicates the new rectangle is the seed
-
-                double tempLowestHigh = newRect.max[d];
-                int tempLowestHighIndex = -1;
-
-                for (int i = 0; i < n.entryCount; i++)
+                int highest = -1, secondHighest = -1;
+                int lowest = -1, secondLowest = -1;
+                for (int i = 0; i <= n.entryCount; i++)
                 {
-                    double tempLow = n.entries[i].min[d];
-                    if (tempLow >= tempHighestLow)
+                    Rectangle candidate = i == n.entryCount ? newRect : n.entries[i];
+                    Rectangle high = highest == n.entryCount ? newRect : highest < 0 ? null : n.entries[highest];
+                    Rectangle low = lowest == n.entryCount ? newRect : lowest < 0 ? null : n.entries[lowest];
+                    if (high == null || candidate.min[d] > high.min[d])
                     {
-                        tempHighestLow = tempLow;
-                        tempHighestLowIndex = i;
+                        secondHighest = highest;
+                        highest = i;
                     }
                     else
-                    {  // ensure that the same index cannot be both lowestHigh and highestLow
-                        double tempHigh = n.entries[i].max[d];
-                        if (tempHigh <= tempLowestHigh)
-                        {
-                            tempLowestHigh = tempHigh;
-                            tempLowestHighIndex = i;
-                        }
-                    }
-
-                    // PS2 [Adjust for shape of the rectangle cluster] Normalize the separations
-                    // by dividing by the widths of the entire set along the corresponding
-                    // dimension
-                    double normalizedSeparation = (tempHighestLow - tempLowestHigh) / (n.mbr.max[d] - n.mbr.min[d]);
-
-                    // PS3 [Select the most extreme pair] Choose the pair with the greatest
-                    // normalized separation along any dimension.
-                    if (normalizedSeparation > maxNormalizedSeparation)
                     {
-                        maxNormalizedSeparation = normalizedSeparation;
-                        highestLowIndex = tempHighestLowIndex;
-                        lowestHighIndex = tempLowestHighIndex;
+                        Rectangle second = secondHighest == n.entryCount ? newRect : secondHighest < 0 ? null : n.entries[secondHighest];
+                        if (second == null || candidate.min[d] > second.min[d]) secondHighest = i;
                     }
+                    if (low == null || candidate.max[d] < low.max[d])
+                    {
+                        secondLowest = lowest;
+                        lowest = i;
+                    }
+                    else
+                    {
+                        Rectangle second = secondLowest == n.entryCount ? newRect : secondLowest < 0 ? null : n.entries[secondLowest];
+                        if (second == null || candidate.max[d] < second.max[d]) secondLowest = i;
+                    }
+                }
+
+                if (highest == lowest)
+                {
+                    Rectangle highAlternative = secondHighest == n.entryCount ? newRect : n.entries[secondHighest];
+                    Rectangle lowAlternative = secondLowest == n.entryCount ? newRect : n.entries[secondLowest];
+                    Rectangle shared = highest == n.entryCount ? newRect : n.entries[highest];
+                    if (normalizedSeparation(highAlternative, shared, n.mbr, d) >=
+                        normalizedSeparation(shared, lowAlternative, n.mbr, d)) highest = secondHighest;
+                    else lowest = secondLowest;
+                }
+                Rectangle highSeed = highest == n.entryCount ? newRect : n.entries[highest];
+                Rectangle lowSeed = lowest == n.entryCount ? newRect : n.entries[lowest];
+                double separation = normalizedSeparation(highSeed, lowSeed, n.mbr, d);
+                if (separation > maxNormalizedSeparation)
+                {
+                    maxNormalizedSeparation = separation;
+                    highestLowIndex = highest == n.entryCount ? -1 : highest;
+                    lowestHighIndex = lowest == n.entryCount ? -1 : lowest;
                 }
             }
 
@@ -687,6 +733,17 @@ namespace RTree
             n.mbr.set(n.entries[lowestHighIndex].min, n.entries[lowestHighIndex].max);
         }
 
+        private static double normalizedSeparation(Rectangle high, Rectangle low, Rectangle bounds, int dimension)
+        {
+            // Normalize coordinates before subtraction: both the numerator and
+            // axis width can overflow for otherwise valid finite coordinates.
+            double scale = Math.Max(Math.Abs(bounds.min[dimension]), Math.Abs(bounds.max[dimension]));
+            if (scale == 0) return 0;
+            double width = bounds.max[dimension] / scale - bounds.min[dimension] / scale;
+            if (width == 0) return 0;
+            return (high.min[dimension] / scale - low.max[dimension] / scale) / width;
+        }
+
 
 
         
@@ -714,36 +771,18 @@ namespace RTree
 
                     double nIncrease = n.mbr.enlargement(n.entries[i]);
                     double newNodeIncrease = newNode.mbr.enlargement(n.entries[i]);
-                    double difference = Math.Abs(nIncrease - newNodeIncrease);
+                    // Equal infinite costs are a tie, not a NaN difference.
+                    double difference = nIncrease == newNodeIncrease ? 0 : Math.Abs(nIncrease - newNodeIncrease);
 
                     if (difference > maxDifference)
                     {
                         next = i;
 
-                        if (nIncrease < newNodeIncrease)
-                        {
-                            nextGroup = 0;
-                        }
-                        else if (newNodeIncrease < nIncrease)
-                        {
-                            nextGroup = 1;
-                        }
-                        else if (n.mbr.area() < newNode.mbr.area())
-                        {
-                            nextGroup = 0;
-                        }
-                        else if (newNode.mbr.area() < n.mbr.area())
-                        {
-                            nextGroup = 1;
-                        }
-                        else if (newNode.entryCount < maxNodeEntries / 2)
-                        {
-                            nextGroup = 0;
-                        }
-                        else
-                        {
-                            nextGroup = 1;
-                        }
+                        int comparison = nIncrease.CompareTo(newNodeIncrease);
+                        if (comparison == 0)
+                            comparison = compareEnlargementTies(n.mbr, newNode.mbr, n.entries[i]);
+                        if (comparison == 0) comparison = n.entryCount.CompareTo(newNode.entryCount);
+                        nextGroup = comparison <= 0 ? 0 : 1;
                         maxDifference = difference;
                     }
                 }
@@ -780,19 +819,54 @@ namespace RTree
         /// <param name="n"></param>
         /// <param name="nearestDistance"></param>
         /// <returns></returns>
-        private double nearest(Point p, Node<T> n, double nearestDistance)
+        private const double MinimumNormalDistance = 2.2250738585072014e-308;
+        private const double SmallDistanceScale = 1.3407807929942597e154; // 2^512
+
+        // Rank 0 stores subnormal distances scaled up, 1 stores ordinary
+        // distances, 2 stores overflowing distances at quarter scale, and 3
+        // is the unbounded sentinel. Scaling keeps extreme norms sortable.
+        private struct NearestDistance
+        {
+            internal readonly double value;
+            internal readonly int rank;
+
+            internal NearestDistance(double value, int rank)
+            {
+                this.value = value;
+                this.rank = rank;
+            }
+
+            internal int CompareTo(NearestDistance other)
+            {
+                return rank == other.rank ? value.CompareTo(other.value) : rank.CompareTo(other.rank);
+            }
+        }
+
+        private static NearestDistance pointDistance(Rectangle rectangle, Point point)
+        {
+            double distance = rectangle.distance(point);
+            if (distance == 0) return new NearestDistance(0, 0);
+            if (distance < MinimumNormalDistance)
+                return new NearestDistance(rectangle.distanceScaled(point, SmallDistanceScale), 0);
+            if (double.IsPositiveInfinity(distance))
+                return new NearestDistance(rectangle.distanceScaled(point, 0.25), 2);
+            return new NearestDistance(distance, 1);
+        }
+
+        private NearestDistance nearest(Point p, Node<T> n, NearestDistance nearestDistance)
         {
             for (int i = 0; i < n.entryCount; i++)
             {
-                double tempDistance = n.entries[i].distance(p);
+                NearestDistance tempDistance = pointDistance(n.entries[i], p);
+                int comparison = tempDistance.CompareTo(nearestDistance);
                 if (n.isLeaf())
                 { // for leaves, the distance is an actual nearest distance 
-                    if (tempDistance < nearestDistance)
+                    if (comparison < 0)
                     {
                         nearestDistance = tempDistance;
                         nearestIds.Clear();
                     }
-                    if (tempDistance <= nearestDistance)
+                    if (comparison <= 0)
                     {
                         nearestIds.Add(n.ids[i]);
                     }
@@ -800,7 +874,7 @@ namespace RTree
                 else
                 { // for index nodes, only go into them if they potentially could have
                     // a rectangle nearer than actualNearest
-                    if (tempDistance <= nearestDistance)
+                    if (comparison <= 0)
                     {
                         // search the child node
                         nearestDistance = nearest(p, getNode(n.ids[i]), nearestDistance);
@@ -821,7 +895,7 @@ namespace RTree
         /// <param name="r"></param>
         /// <param name="v"></param>
         /// <param name="n"></param>
-        private void intersects(Rectangle r, intproc v, Node<T> n)
+        private void intersects(Rectangle r, IntProcedure v, Node<T> n)
         {
             for (int i = 0; i < n.entryCount; i++)
             {
@@ -903,7 +977,7 @@ namespace RTree
                     e.entries[j] = null;
                 }
                 e.entryCount = 0;
-                deletedNodeIds.Push(e.nodeId);
+                releaseNode(e.nodeId);
             }
         }
 
@@ -936,7 +1010,7 @@ namespace RTree
                     double tempEnlargement = tempRectangle.enlargement(r);
                     if ((tempEnlargement < leastEnlargement) ||
                         ((tempEnlargement == leastEnlargement) &&
-                         (tempRectangle.area() < n.getEntry(index).area())))
+                         compareEnlargementTies(tempRectangle, n.getEntry(index), r) < 0))
                     {
                         index = i;
                         leastEnlargement = tempEnlargement;
@@ -950,6 +1024,21 @@ namespace RTree
                 // pointed to by Fp and repeat from CL2
                 n = getNode(n.ids[index]);
             }
+        }
+
+        private static int compareEnlargementTies(Rectangle left, Rectangle right, Rectangle addition)
+        {
+            // Volume alone cannot distinguish planar boxes, lines or points.
+            // Use lower-dimensional growth before comparing existing box sizes.
+            int comparison = left.surfaceEnlargement(addition).CompareTo(right.surfaceEnlargement(addition));
+            if (comparison != 0) return comparison;
+            comparison = left.marginEnlargement(addition).CompareTo(right.marginEnlargement(addition));
+            if (comparison != 0) return comparison;
+            comparison = left.area().CompareTo(right.area());
+            if (comparison != 0) return comparison;
+            comparison = left.surfaceArea().CompareTo(right.surfaceArea());
+            if (comparison != 0) return comparison;
+            return left.margin().CompareTo(right.margin());
         }
 
         /**
