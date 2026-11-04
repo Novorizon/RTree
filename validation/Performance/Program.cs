@@ -11,7 +11,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using RTree;
 
-internal static class Program
+internal static partial class Program
 {
     private const int Seed = 712367;
     private static readonly string[] Scenarios = { "uniform-3d", "z-only", "planar-xy" };
@@ -24,6 +24,12 @@ internal static class Program
         internal string Label = "current";
         internal string? JsonPath;
         internal bool AllowMutationFailure;
+        internal bool Advanced;
+        internal bool AdvancedOnly;
+        internal int[] Capacities = { 10, 8, 16, 32, 64 };
+        internal int[] Workers = { 1, 2, 4 };
+        internal int ConcurrentRepeats = 4;
+        internal bool BulkOnly;
     }
 
     private sealed class Dataset
@@ -57,6 +63,17 @@ internal static class Program
         public double? AllocatedBytesPerOperation { get; set; }
         public string? Checksum { get; set; }
         public string? Error { get; set; }
+        public string? BuildMode { get; set; }
+        public int NodeCapacity { get; set; } = 10;
+        public int Threads { get; set; } = 1;
+        public double? MeanMatches { get; set; }
+        public double? MeanNodesVisited { get; set; }
+        public double? MeanEntriesTested { get; set; }
+        public long? RetainedIndexBytes { get; set; }
+        public int LatencyBatchSamples { get; set; }
+        public double? P50BatchMeanMicroseconds { get; set; }
+        public double? P95BatchMeanMicroseconds { get; set; }
+        public double? P99BatchMeanMicroseconds { get; set; }
     }
 
     private sealed class Report
@@ -83,14 +100,19 @@ internal static class Program
         {
             if (args.Contains("--help"))
             {
-                Console.WriteLine("Performance [--sizes 10000,50000] [--queries 200] [--rounds 3] [--label current] [--json path] [--allow-mutation-failure]");
+                Console.WriteLine("Performance [--sizes 10000,50000] [--queries 200] [--rounds 3] [--label current] [--json path] [--allow-mutation-failure] [--advanced|--advanced-only|--bulk-only] [--capacities 10,8,16,32,64] [--workers 1,2,4] [--concurrent-repeats 4]");
                 Console.WriteLine("Build with -p:SourceDirectory=/absolute/path/to/original/sources to compare an unmodified baseline.");
+                Console.WriteLine("Build with -p:OptimizedApi=true to enable reusable buffers, STR, capacity sweep and parallel-reader measurements.");
                 return 0;
             }
 #if DEBUG
             throw new InvalidOperationException("Performance measurements require a Release build (-c Release).");
 #endif
             var options = Parse(args);
+#if !OPTIMIZED_API
+            if (options.Advanced || options.AdvancedOnly)
+                throw new ArgumentException("Advanced measurements require -p:OptimizedApi=true and the optimized source revision.");
+#endif
             var report = new Report
             {
                 Label = options.Label,
@@ -106,7 +128,7 @@ internal static class Program
                 Seed = Seed,
                 Rounds = options.Rounds,
                 QueriesPerWorkload = options.Queries,
-                Methodology = "Single process/thread; default node capacity 10; deterministic data and queries; one warm-up per dataset; median of measured rounds; full GC before each sample, outside timing. Query APIs and linear scan both materialize List<int> results. Every measured result is compared as a sorted set with an independent brute-force oracle outside timing. Allocation uses GC.GetAllocatedBytesForCurrentThread; mutation is delete+reinsert of the same unique item with a new box, reported per individual API call. Build, data generation, oracle computation and result verification are excluded. Shared-host wall-clock results are workload-specific, not a universal guarantee."
+                Methodology = "Deterministic datasets and independent brute-force oracles; one full warm-up; median of measured rounds; full GC before each sample outside timing. Compatibility rows use identical List-return APIs and materialize results for both tree and scan. Reusable-buffer rows are a separate workload: buffers/context are prewarmed, all result IDs checked before and after each round outside timing, and total match counts are consumed inside timing. Diagnostic node/entry/match statistics are collected in a separate untimed pass. Allocation uses GC.GetAllocatedBytesForCurrentThread. Batch latency quantiles describe round-level mean latency, NOT individual-call or service P99; sample count is recorded. Mutation counts Delete and Add as separate API calls. Advanced parallel rows exclude thread setup and warm-up, include gate/scheduling overhead, use one buffer/context per thread, and verify per-query counts plus independent preflight ID checks. Build/data/oracle/verification are excluded from timing. Shared-host measurements are workload-specific."
             };
             Console.WriteLine("label=" + report.Label + " source=" + Path.GetFullPath(report.SourceDirectory));
             Console.WriteLine(report.Framework + " | " + report.OperatingSystem + " | " + report.Architecture);
@@ -116,6 +138,7 @@ internal static class Program
             Console.WriteLine("scenario,items,workload,implementation,operations,rounds,median_ms,us_per_op,ops_per_s,allocated_bytes_per_op,checksum,status");
 
             bool mutationFailed = false;
+            if (!options.AdvancedOnly)
             foreach (string scenario in Scenarios)
             {
                 foreach (int size in options.Sizes)
@@ -157,6 +180,7 @@ internal static class Program
                     }
 
                     AddRow(report, scenario, size, "insert", "tree", size, insertSamples.Select(s => (s.Milliseconds, s.AllocatedBytes)).ToList(), size.ToString(CultureInfo.InvariantCulture));
+                    report.Results[report.Results.Count - 1].RetainedIndexBytes = EstimateRetainedBytes(() => Build(data.Boxes));
                     foreach (string name in new[] { "intersects", "contains", "nearest" })
                     {
                         foreach (string implementation in new[] { "tree", "scan" })
@@ -164,6 +188,11 @@ internal static class Program
                             var samples = querySamples[name + "/" + implementation];
                             AddRow(report, scenario, size, name, implementation, options.Queries,
                                 samples.Select(s => (s.Milliseconds, s.AllocatedBytes)).ToList(), Checksum(samples[0].Value));
+                            report.Results[report.Results.Count - 1].MeanMatches = samples[0].Value.Average(list => list.Count);
+#if OPTIMIZED_API
+                            if (implementation == "tree")
+                                SetStatistics(report.Results[report.Results.Count - 1], insertSamples[insertSamples.Count - 1].Value, data, name);
+#endif
                         }
                     }
 
@@ -208,6 +237,10 @@ internal static class Program
                 }
             }
 
+#if OPTIMIZED_API
+            if (options.Advanced || options.AdvancedOnly) RunAdvanced(options, report);
+#endif
+
             if (options.JsonPath != null)
             {
                 string path = Path.GetFullPath(options.JsonPath);
@@ -237,6 +270,9 @@ internal static class Program
         {
             string name = args[i];
             if (name == "--allow-mutation-failure") { options.AllowMutationFailure = true; continue; }
+            if (name == "--advanced") { options.Advanced = true; continue; }
+            if (name == "--advanced-only") { options.AdvancedOnly = true; continue; }
+            if (name == "--bulk-only") { options.BulkOnly = true; options.AdvancedOnly = true; continue; }
             if (++i >= args.Length) throw new ArgumentException("Missing value for " + name);
             switch (name)
             {
@@ -245,11 +281,16 @@ internal static class Program
                 case "--rounds": options.Rounds = int.Parse(args[i], CultureInfo.InvariantCulture); break;
                 case "--label": options.Label = args[i]; break;
                 case "--json": options.JsonPath = args[i]; break;
+                case "--capacities": options.Capacities = args[i].Split(',').Select(s => int.Parse(s, CultureInfo.InvariantCulture)).ToArray(); break;
+                case "--workers": options.Workers = args[i].Split(',').Select(s => int.Parse(s, CultureInfo.InvariantCulture)).ToArray(); break;
+                case "--concurrent-repeats": options.ConcurrentRepeats = int.Parse(args[i], CultureInfo.InvariantCulture); break;
                 default: throw new ArgumentException("Unknown argument: " + name);
             }
         }
         if (options.Sizes.Length == 0 || options.Sizes.Any(n => n < 100) || options.Queries < 1 || options.Rounds < 1)
             throw new ArgumentException("Sizes must be at least 100; queries and rounds must be positive.");
+        if (options.Capacities.Length == 0 || options.Capacities.Any(n => n < 2) || options.Workers.Length == 0 || options.Workers.Any(n => n < 1) || options.ConcurrentRepeats < 1)
+            throw new ArgumentException("Capacities must be at least 2; workers and concurrent repeats must be positive.");
         return options;
     }
 
@@ -489,6 +530,7 @@ internal static class Program
             OperationsPerSecond = operations * 1000 / milliseconds,
             AllocatedBytesPerOperation = bytes / operations, Checksum = checksum
         };
+        SetBatchQuantiles(row, samples.Select(s => s.Milliseconds * 1000 / operations).ToArray());
         report.Results.Add(row);
         Print(row);
     }
@@ -501,6 +543,35 @@ internal static class Program
     }
 
     private static string Number(double? value) => value.HasValue ? value.Value.ToString("F3", CultureInfo.InvariantCulture) : "";
+
+    private static void SetBatchQuantiles(Row row, double[] batchMeans)
+    {
+        Array.Sort(batchMeans);
+        row.LatencyBatchSamples = batchMeans.Length;
+        row.P50BatchMeanMicroseconds = Quantile(batchMeans, 0.50);
+        row.P95BatchMeanMicroseconds = Quantile(batchMeans, 0.95);
+        row.P99BatchMeanMicroseconds = Quantile(batchMeans, 0.99);
+    }
+
+    private static long EstimateRetainedBytes(Func<RTree<int>> factory)
+    {
+        // An isolated, untimed estimate. Caller-owned input boxes already exist.
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        long before = GC.GetTotalMemory(true);
+        var tree = factory();
+        long after = GC.GetTotalMemory(true);
+        GC.KeepAlive(tree);
+        return Math.Max(0, after - before);
+    }
+
+    private static double Quantile(double[] sorted, double fraction)
+    {
+        if (sorted.Length == 0) return double.NaN;
+        double index = fraction * (sorted.Length - 1);
+        int low = (int)index;
+        int high = Math.Min(low + 1, sorted.Length - 1);
+        return sorted[low] + (sorted[high] - sorted[low]) * (index - low);
+    }
 
     private static string ProcessorName()
     {

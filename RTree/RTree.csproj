@@ -44,6 +44,9 @@
     <Compile Include="Point.cs" />
     <Compile Include="Rectangle.cs" />
     <Compile Include="RTree.cs" />
+    <Compile Include="Aabb.cs" />
+    <Compile Include="QueryContext.cs" />
+    <Compile Include="RTree.Queries.cs" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Properties\" />
