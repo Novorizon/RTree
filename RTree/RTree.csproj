@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -41,25 +41,25 @@
     <Reference Include="System.Numerics" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Node.cs" />
-    <Compile Include="Point.cs" />
-    <Compile Include="Rectangle.cs" />
-    <Compile Include="RTree.cs" />
-    <Compile Include="Aabb.cs" />
-    <Compile Include="QueryContext.cs" />
-    <Compile Include="RTree.Queries.cs" />
-    <Compile Include="SpatialGeometry.cs" />
-    <Compile Include="SpatialContracts.cs" />
-    <Compile Include="SpatialQueryExtensions.cs" />
-    <Compile Include="RTreeIndex.cs" />
-    <Compile Include="RTree.Spatial.cs" />
-    <Compile Include="DynamicAabbTree.cs" />
-    <Compile Include="StaticBvh.cs" />
-    <Compile Include="TriangleBvh.cs" />
-    <Compile Include="LooseOctree.cs" />
-    <Compile Include="KdTree.cs" />
-    <Compile Include="TriangleIntersection.cs" />
-    <Compile Include="TriangleExact.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\RTree\Node.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\Point.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\Rectangle.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\RTree\RTree.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\Aabb.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\QueryContext.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\RTree\RTree.Queries.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\SpatialGeometry.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\SpatialContracts.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\SpatialQueryExtensions.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\RTree\RTreeIndex.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\RTree\RTree.Spatial.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\DynamicAabbTree\DynamicAabbTree.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\StaticBvh\StaticBvh.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\TriangleBvh\TriangleBvh.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\LooseOctree\LooseOctree.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\KdTree\KdTree.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\TriangleIntersection.cs" />
+    <Compile Include="..\Packages\com.novorizon.rtree\Runtime\Common\TriangleExact.cs" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Properties\" />

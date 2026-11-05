@@ -1,0 +1,18 @@
+{
+  "name": "com.novorizon.rtree",
+  "version": "1.0.0-preview.2",
+  "displayName": "Novorizon Spatial Indexes",
+  "description": "Unity 3D spatial queries using RTree, dynamic AABB, BVH, octree and KD indexes.",
+  "unity": "2022.3",
+  "license": "LGPL-2.1-or-later",
+  "author": {
+    "name": "Novorizon"
+  },
+  "samples": [
+    {
+      "displayName": "Spatial Queries",
+      "description": "Bounds insert, move, sphere query and remove without gameplay dependencies.",
+      "path": "Samples~/SpatialQueries"
+    }
+  ]
+}
