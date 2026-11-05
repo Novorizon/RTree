@@ -139,21 +139,29 @@ namespace RTree
                     context.Push(0);
                     while (context.stackCount != 0)
                     {
-                        Node node = nodes[context.Pop()];
-                        if (statistics) { context.NodesVisited++; context.EntriesTested++; }
-                        if (!Matches(node.Bounds, query, sphere, frustum, kind)) continue;
+                        int pending = context.Pop();
+                        bool accepted = pending < 0;
+                        if (accepted) pending = ~pending;
+                        Node node = nodes[pending];
+                        if (statistics) context.NodesVisited++;
+                        if (!accepted)
+                        {
+                            if (statistics) context.EntriesTested++;
+                            if (!Matches(node.Bounds, query, sphere, frustum, kind)) continue;
+                            accepted = kind == 0 && query.Box.Contains(node.Bounds);
+                        }
                         if (node.Count == 0)
                         {
-                            context.Push(node.Right);
-                            context.Push(node.Left);
+                            context.Push(accepted ? ~node.Right : node.Right);
+                            context.Push(accepted ? ~node.Left : node.Left);
                         }
                         else
                         {
                             for (int i = 0; i < node.Count; i++)
                             {
                                 int id = order[node.Start + i];
-                                if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                                if (Matches(bounds[id], query, sphere, frustum, kind)) results.Add(items[id]);
+                                if (statistics && !accepted) { context.EntriesTested++; context.PrimitiveTests++; }
+                                if (accepted || Matches(bounds[id], query, sphere, frustum, kind)) results.Add(items[id]);
                             }
                         }
                     }
@@ -205,7 +213,7 @@ namespace RTree
                     if (nodes.Length == 0) return false;
                     bool statistics = context.CollectStatistics;
                     if (statistics) context.EntriesTested++;
-                    if (!ray.Intersects(Bounds3.FromAabb(nodes[0].Bounds), out near, out far)) return false;
+                    if (!ray.IntersectsUnchecked(nodes[0].Bounds, out near, out far)) return false;
                     bool found = false;
                     double best = ray.TMax;
                     context.Push(0, new DistanceKey(near, 4));
@@ -218,9 +226,9 @@ namespace RTree
                         if (node.Count == 0)
                         {
                             if (statistics) context.EntriesTested += 2;
-                            if (ray.Intersects(Bounds3.FromAabb(nodes[node.Left].Bounds), out near, out far) && near <= best)
+                            if (ray.IntersectsUnchecked(nodes[node.Left].Bounds, out near, out far) && near <= best)
                                 context.Push(node.Left, new DistanceKey(near, 4));
-                            if (ray.Intersects(Bounds3.FromAabb(nodes[node.Right].Bounds), out near, out far) && near <= best)
+                            if (ray.IntersectsUnchecked(nodes[node.Right].Bounds, out near, out far) && near <= best)
                                 context.Push(node.Right, new DistanceKey(near, 4));
                             continue;
                         }
@@ -228,7 +236,7 @@ namespace RTree
                         {
                             int id = order[node.Start + i];
                             if (statistics) { context.EntriesTested++; if (intersector == null) context.PrimitiveTests++; }
-                            if (!ray.Intersects(Bounds3.FromAabb(bounds[id]), out near, out far) || near > best) continue;
+                            if (!ray.IntersectsUnchecked(bounds[id], out near, out far) || near > best) continue;
                             double parameter = near;
                             if (intersector != null)
                             {
@@ -279,7 +287,7 @@ namespace RTree
                         Node node = nodes[context.Pop()];
                         double near, far;
                         if (statistics) { context.NodesVisited++; context.EntriesTested++; }
-                        if (!ray.Intersects(Bounds3.FromAabb(node.Bounds), out near, out far)) continue;
+                        if (!ray.IntersectsUnchecked(node.Bounds, out near, out far)) continue;
                         if (node.Count == 0)
                         {
                             context.Push(node.Right);
@@ -291,7 +299,7 @@ namespace RTree
                             {
                                 int id = order[node.Start + i];
                                 if (statistics) { context.EntriesTested++; if (intersector == null) context.PrimitiveTests++; }
-                                if (!ray.Intersects(Bounds3.FromAabb(bounds[id]), out near, out far)) continue;
+                                if (!ray.IntersectsUnchecked(bounds[id], out near, out far)) continue;
                                 double parameter = near;
                                 if (intersector != null)
                                 {

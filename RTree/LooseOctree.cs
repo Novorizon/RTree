@@ -18,7 +18,7 @@ namespace RTree
         {
             internal Bounds3 Tight, Loose;
             internal int Parent, ParentOctant, Depth, FirstItem, ItemCount, ChildCount;
-            internal bool Split;
+            internal bool Split, HasBounds;
         }
 
         private readonly ReaderWriterLockSlim sync =
@@ -29,6 +29,9 @@ namespace RTree
         private readonly bool autoExpand;
         private Bounds3 worldBounds;
         private OctreeNode[] nodes = new OctreeNode[16];
+        // Separate from cell metadata so rejected queries read only 48 bytes.
+        // Bounds grow on writes; Rebuild removes slack left by moves/removals.
+        private Aabb[] queryBounds = new Aabb[16];
         private int[] children = new int[16 * 8];
         private int[] freeNodes = new int[16];
         private int freeNodeCount, nextNode;
@@ -117,6 +120,7 @@ namespace RTree
                 if (nodes[owner[slot]].Loose.Contains(bounds))
                 {
                     proxies.Bounds[slot] = bounds;
+                    GrowBounds(owner[slot], bounds.Box);
                     return false;
                 }
                 int oldNode = owner[slot];
@@ -204,6 +208,7 @@ namespace RTree
                 {
                     int capacity = checked(nodes.Length * 2);
                     Array.Resize(ref nodes, capacity);
+                    Array.Resize(ref queryBounds, capacity);
                     Array.Resize(ref children, checked(capacity * 8));
                     Array.Resize(ref freeNodes, capacity);
                 }
@@ -218,6 +223,7 @@ namespace RTree
             node.Depth = depth;
             node.FirstItem = -1;
             nodes[id] = node;
+            queryBounds[id] = default(Aabb);
             int offset = id * 8;
             for (int i = 0; i < 8; i++) children[offset + i] = -1;
             return id;
@@ -232,6 +238,25 @@ namespace RTree
             if (first >= 0) previousItem[first] = slot;
             nodes[nodeId].FirstItem = slot;
             nodes[nodeId].ItemCount++;
+            GrowBounds(nodeId, proxies.Bounds[slot].Box);
+        }
+
+        private void GrowBounds(int nodeId, Aabb bounds)
+        {
+            while (nodeId >= 0)
+            {
+                if (nodes[nodeId].HasBounds)
+                {
+                    if (queryBounds[nodeId].Contains(bounds)) return;
+                    queryBounds[nodeId] = Aabb.Union(queryBounds[nodeId], bounds);
+                }
+                else
+                {
+                    queryBounds[nodeId] = bounds;
+                    nodes[nodeId].HasBounds = true;
+                }
+                nodeId = nodes[nodeId].Parent;
+            }
         }
 
         private void Unlink(int slot)
@@ -423,17 +448,24 @@ namespace RTree
                     while (context.stackCount != 0)
                     {
                         int nodeId = context.Pop();
+                        bool accepted = nodeId < 0;
+                        if (accepted) nodeId = ~nodeId;
+                        if (statistics) context.NodesVisited++;
+                        if (!accepted)
+                        {
+                            if (statistics) context.EntriesTested++;
+                            if (!Matches(kind, bounds, sphere, frustum, Bounds3.FromAabb(queryBounds[nodeId]))) continue;
+                            accepted = kind == 0 && bounds.Box.Contains(queryBounds[nodeId]);
+                        }
                         OctreeNode node = nodes[nodeId];
-                        if (statistics) { context.NodesVisited++; context.EntriesTested++; }
-                        if (!Matches(kind, bounds, sphere, frustum, node.Loose)) continue;
                         for (int slot = node.FirstItem; slot >= 0; slot = nextItem[slot])
                         {
-                            if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (Matches(kind, bounds, sphere, frustum, proxies.Bounds[slot])) results.Add(proxies.Items[slot]);
+                            if (statistics && !accepted) { context.EntriesTested++; context.PrimitiveTests++; }
+                            if (accepted || Matches(kind, bounds, sphere, frustum, proxies.Bounds[slot])) results.Add(proxies.Items[slot]);
                         }
                         int offset = nodeId * 8;
                         for (int i = 0; i < 8; i++)
-                            if (children[offset + i] >= 0) context.Push(children[offset + i]);
+                            if (children[offset + i] >= 0) context.Push(accepted ? ~children[offset + i] : children[offset + i]);
                     }
                     context.ResultCount = results.Count;
                     return results.Count;
@@ -471,14 +503,14 @@ namespace RTree
                     while (context.stackCount != 0)
                     {
                         int nodeId = context.Pop();
-                        OctreeNode node = nodes[nodeId];
                         if (statistics) { context.NodesVisited++; context.EntriesTested++; }
                         double near, far;
-                        if (!ray.Intersects(node.Loose, out near, out far)) continue;
+                        if (!ray.IntersectsUnchecked(queryBounds[nodeId], out near, out far)) continue;
+                        OctreeNode node = nodes[nodeId];
                         for (int slot = node.FirstItem; slot >= 0; slot = nextItem[slot])
                         {
                             if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (!ray.Intersects(proxies.Bounds[slot], out near, out far)) continue;
+                            if (!ray.IntersectsUnchecked(proxies.Bounds[slot], out near, out far)) continue;
                             hit = new RayHit<T>(proxies.Items[slot], near);
                             context.ResultCount = 1;
                             return true;
@@ -509,7 +541,7 @@ namespace RTree
                     if (proxies.Count == 0) return false;
                     bool statistics = context.CollectStatistics, found = false;
                     if (statistics) context.EntriesTested++;
-                    if (!ray.Intersects(nodes[0].Loose, out near, out far)) return false;
+                    if (!ray.IntersectsUnchecked(queryBounds[0], out near, out far)) return false;
                     double closest = ray.TMax;
                     context.Push(0, new DistanceKey(near, 4));
                     while (context.heapCount != 0)
@@ -522,7 +554,7 @@ namespace RTree
                         for (int slot = node.FirstItem; slot >= 0; slot = nextItem[slot])
                         {
                             if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (!ray.Intersects(proxies.Bounds[slot], out near, out far) || near > closest) continue;
+                            if (!ray.IntersectsUnchecked(proxies.Bounds[slot], out near, out far) || near > closest) continue;
                             found = true;
                             closest = near;
                             hit = new RayHit<T>(proxies.Items[slot], near);
@@ -533,7 +565,7 @@ namespace RTree
                             int child = children[offset + i];
                             if (child < 0) continue;
                             if (statistics) context.EntriesTested++;
-                            if (ray.Intersects(nodes[child].Loose, out near, out far) && near <= closest)
+                            if (ray.IntersectsUnchecked(queryBounds[child], out near, out far) && near <= closest)
                                 context.Push(child, new DistanceKey(near, 4));
                         }
                     }
@@ -563,14 +595,14 @@ namespace RTree
                     while (context.stackCount != 0)
                     {
                         int nodeId = context.Pop();
-                        OctreeNode node = nodes[nodeId];
                         if (statistics) { context.NodesVisited++; context.EntriesTested++; }
                         double near, far;
-                        if (!ray.Intersects(node.Loose, out near, out far)) continue;
+                        if (!ray.IntersectsUnchecked(queryBounds[nodeId], out near, out far)) continue;
+                        OctreeNode node = nodes[nodeId];
                         for (int slot = node.FirstItem; slot >= 0; slot = nextItem[slot])
                         {
                             if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (ray.Intersects(proxies.Bounds[slot], out near, out far)) results.Add(new RayHit<T>(proxies.Items[slot], near));
+                            if (ray.IntersectsUnchecked(proxies.Bounds[slot], out near, out far)) results.Add(new RayHit<T>(proxies.Items[slot], near));
                         }
                         int offset = nodeId * 8;
                         for (int i = 0; i < 8; i++)

@@ -103,6 +103,12 @@ namespace RTree
             double x = Normal.X >= 0 ? bounds.MaxX : bounds.MinX;
             double y = Normal.Y >= 0 ? bounds.MaxY : bounds.MinY;
             double z = Normal.Z >= 0 ? bounds.MaxZ : bounds.MinZ;
+            double ax = Normal.X * x, by = Normal.Y * y, cz = Normal.Z * z;
+            double magnitude = Math.Abs(ax) + Math.Abs(by) + Math.Abs(cz) + Math.Abs(Offset);
+            // Ordinary coordinates need no normalization. The error allowance
+            // covers cancellation; extreme sums keep the scaled robust path.
+            if (magnitude >= 1e-280 && magnitude <= 1e280)
+                return ax + by + cz + Offset < -3.552713678800501e-15 * magnitude;
             double coordinates = Math.Max(1, Math.Max(Math.Abs(x), Math.Max(Math.Abs(y), Math.Abs(z))));
             double coefficients = Math.Max(Math.Abs(Offset), Math.Max(Math.Abs(Normal.X), Math.Max(Math.Abs(Normal.Y), Math.Abs(Normal.Z))));
             double a = (Normal.X / coefficients) * (x / coordinates);
@@ -156,7 +162,19 @@ namespace RTree
         }
         public bool Intersects(Bounds3 bounds, out double near, out double far)
         {
-            Validate(); near = TMin; far = TMax;
+            Validate();
+            return IntersectsUnchecked(bounds.Box, out near, out far);
+        }
+        // Tree entry points validate once. Internal bounds were validated when
+        // inserted, so traversal can retain the same robust slabs without
+        // repeating public argument validation for every visited bound.
+        internal bool IntersectsUnchecked(Bounds3 bounds, out double near, out double far)
+        {
+            return IntersectsUnchecked(bounds.Box, out near, out far);
+        }
+        internal bool IntersectsUnchecked(Aabb bounds, out double near, out double far)
+        {
+            near = TMin; far = TMax;
             if (!Slab(bounds.MinX, bounds.MaxX, Origin.X, Direction.X, ref near, ref far)) return false;
             if (!Slab(bounds.MinY, bounds.MaxY, Origin.Y, Direction.Y, ref near, ref far)) return false;
             if (!Slab(bounds.MinZ, bounds.MaxZ, Origin.Z, Direction.Z, ref near, ref far)) return false;

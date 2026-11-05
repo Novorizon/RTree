@@ -87,7 +87,7 @@ namespace RTree
                 {
                     if (nodes[rootNodeId].Count == 0) return false;
                     double near, far;
-                    if (!ray.Intersects(Bounds3.FromAabb(nodes[rootNodeId].Bounds), out near, out far)) return false;
+                    if (!ray.IntersectsUnchecked(nodes[rootNodeId].Bounds, out near, out far)) return false;
                     context.Push(rootNodeId, new DistanceKey(near, 4));
                     bool found = false, statistics = context.CollectStatistics;
                     double maximum = ray.TMax;
@@ -106,7 +106,7 @@ namespace RTree
                                 context.EntriesTested++;
                                 if (node.Level == 1) context.PrimitiveTests++;
                             }
-                            if (!ray.Intersects(Bounds3.FromAabb(entry.Bounds), out near, out far) || near > maximum) continue;
+                            if (!ray.IntersectsUnchecked(entry.Bounds, out near, out far) || near > maximum) continue;
                             if (node.Level != 1) context.Push(entry.Id, new DistanceKey(near, 4));
                             else
                             {
@@ -142,7 +142,7 @@ namespace RTree
                     {
                         int id = context.Pop(); TreeNode node = nodes[id]; double near, far;
                         if (statistics) { context.NodesVisited++; context.EntriesTested++; }
-                        if (!ray.Intersects(Bounds3.FromAabb(node.Bounds), out near, out far)) continue;
+                        if (!ray.IntersectsUnchecked(node.Bounds, out near, out far)) continue;
                         int offset = id * maxNodeEntries;
                         for (int i = 0; i < node.Count; i++)
                         {
@@ -151,7 +151,7 @@ namespace RTree
                             else
                             {
                                 if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                                if (ray.Intersects(Bounds3.FromAabb(entry.Bounds), out near, out far)) results.Add(new RayHit<T>(itemValues[entry.Id], near));
+                                if (ray.IntersectsUnchecked(entry.Bounds, out near, out far)) results.Add(new RayHit<T>(itemValues[entry.Id], near));
                             }
                         }
                     }

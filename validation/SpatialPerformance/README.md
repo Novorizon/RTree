@@ -4,6 +4,9 @@ This dependency-free .NET 8 console project compiles `../../RTree/*.cs`. It
 compares indexes only where their query semantics match. It does not change the
 library target framework or require a GPU.
 
+Latest changes, paired measurements, current rankings and update/memory
+tradeoffs are recorded in [the optimization report](OPTIMIZATION.md).
+
 Run from the repository root on an otherwise idle machine:
 
 ```sh
@@ -43,6 +46,7 @@ DOTNET_TieredCompilation=0 dotnet run \
 | `triangle-ray` | Triangle SAH BVH and triangle scan | Separate closest-hit and all-hit rows using precise, two-sided triangle intersection |
 | `kd` | Point KD-tree and point scans | Separate radius-35 and k-nearest queries; both return sorted neighbors |
 | `update` | RTree Delete+Add, dynamic AABB Move, loose octree Move | Change a real object's bounds while retaining its payload |
+| `steady-update` | Same mutable indexes | Forward/backward moves after warm cycles, without rebuilding between rounds |
 
 Box-ray times do not represent precise triangle intersection times. Point KD
 times do not represent indexing extended objects. Static BVH refit and rebuild
@@ -114,6 +118,12 @@ include index construction and its input enumeration, but exclude precreated
 input arrays and the update-only handle table. Allocation is cumulative
 allocated bytes, **not retained index memory**.
 
+The optional `--workloads steady-update` reuses one index, alternates original
+and replacement bounds, and runs two complete warm cycles before measurement.
+Each sample times both directions separately and validates outside both timed
+halves, including each dynamic/octree proxy's exact current bounds. Its `steady-move-object` row excludes the initial packed-pool growth
+reported by `move-object`; it still includes any later growth that occurs.
+
 Time per build operation is time per input object. Time per update operation is
 time per **moved object**, so RTree uses two calls (`Delete` and `Add`) for one
 logical move. JSON records `ApiCallsPerOperation` and the mean fraction of moves
@@ -132,8 +142,16 @@ implementation. These single-thread measurements do not imply concurrent-reader
 or GPU throughput. Shared-host results describe these workloads, not a universal
 ranking of spatial trees.
 
+For source-to-source comparisons, pass
+`-p:SourceDirectory=/absolute/path/to/source-files` before `--`. The default is
+the repository's `RTree` source directory; its absolute path is recorded in the
+JSON. Rebuild when switching source directories; do not use `--no-build`.
+`python3 validation/SpatialPerformance/compare.py before.json after.json comparison.csv`
+checks environment, operation counts, checksums, output counts and API semantics
+before writing per-workload timing, allocation and pruning comparisons.
 
-## Recorded CPU implementation comparison
+
+## Initial CPU implementation comparison (b41cdc2)
 
 The checked-in [report](results-current.json) records 336 measured rows at
 10,000 and 100,000 objects across uniform, clustered, mixed-size and planar

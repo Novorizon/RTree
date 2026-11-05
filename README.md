@@ -161,6 +161,9 @@ and [cross-index benchmarks](validation/SpatialPerformance/README.md).
 Dynamic proxies support generation handles and movement; static/triangle BVHs
 support source-order refit; the point KD-tree supports sorted radius and exact-k
 nearest queries. All support concurrent readers and caller-owned buffers.
+Dynamic BVH rotations reduce bounding area while retaining bounded height.
+Octree queries prune by conservative subtree content bounds; Rebuild tightens
+slack accumulated by moves/removals. Both retain caller-owned query workspaces.
 Triangle intersection uses an adaptive exact fallback for difficult numeric
 boundaries; that fallback can allocate, unlike the ordinary warmed fast path.
 

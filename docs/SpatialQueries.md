@@ -13,7 +13,7 @@
 | `RTree<T>` | 动态空间对象与范围查询 | 原 API、STR、`Rebuild` | 保留原 API，另支持共同 bounds/sphere/frustum/ray 接口 |
 
 AABB tree 是 AABB 包围体的 BVH。动态 BVH 使用连续二叉节点、fat bounds、
-高度旋转与 refit；静态 BVH 使用 12-bin SAH，退化划分保持平衡。
+受限高度平衡、降低包围面积的局部旋转与 refit；静态 BVH 使用 12-bin SAH，退化划分保持平衡。
 KD-tree 按最大跨度轴选中位数，保留原输入顺序作为同距次序。
 
 ## 几何与共同查询
@@ -120,7 +120,10 @@ tree.Move(handle, new RTree.Bounds3(2048, 0, 0, 2049, 1, 1));
 
 构造参数依次是初始 world bounds、最大深度 0–32、looseness（至少 1）、
 是否自动扩容。默认 16/2/true。跨子单元的大对象留在合适祖先，代理只出现一次。
-当前 loose cell 足以容纳新真实 bounds 时，Move 只更新数据。
+当前 loose cell 足以容纳新真实 bounds 时，Move 更新数据并在必要时扩张祖先的
+查询内容边界，无需重插。查询按子树内容边界裁剪，而非整个 loose cell。
+内容边界只随写入扩张，保持保守包含；移动和删除积累的空隙可通过 Rebuild 收紧。
+这以每个已分配节点额外 48 字节的边界数组换取更好的裁剪，移动仍可避免结构更新。
 关闭自动扩容时，越界 Insert/Move 抛异常且不改变索引。Rebuild 保留句柄。
 
 ## 点 KD-tree

@@ -77,11 +77,13 @@ internal static class Program
         public int LogicalProcessors { get; set; } = Environment.ProcessorCount;
         public bool ServerGC { get; set; } = GCSettings.IsServerGC;
         public string TieredCompilation { get; set; } = Environment.GetEnvironmentVariable("DOTNET_TieredCompilation") ?? "runtime default";
+        public string SourceDirectory { get; set; } = typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute),false)
+            .Cast<System.Reflection.AssemblyMetadataAttribute>().Single(a=>a.Key=="SourceDirectory").Value ?? "";
         public int Seed { get; set; } = Program.Seed;
         public int Queries { get; set; }
         public int Rounds { get; set; }
         public int K { get; set; }
-        public string Methodology { get; set; } = "Fixed seed; independent brute-force geometry and point-distance oracles; complete result-ID/multiplicity and ray/neighbor-distance checks before and after each measured round. Build/input/oracle/check/statistics are outside query timing. Each index materializes the same exact results into preallocated reusable Lists with one QueryContext; no per-query sorting is added unless required by the API. A full warm-up precedes timing. Median elapsed time and median per-thread allocated bytes across rounds; full GC before each sample outside timing. Diagnostic node/primitive counts use a separate untimed pass. Build operations count indexed objects; update operations count moved objects (RTree uses two API calls: Delete+Add). Updates use a fresh index each round and precreated old/new bounds; static structures do not appear in update rows. Box and precise triangle raycasts are different workloads. KD radius and sorted kNN use a separate point dataset and materializing scan baselines. No concurrency or GPU claims. Shared-host timings are not universal rankings.";
+        public string Methodology { get; set; } = "Fixed seed; independent brute-force geometry and point-distance oracles; complete result-ID/multiplicity and ray/neighbor-distance checks before and after each measured round. Build/input/oracle/check/statistics are outside query timing. Each index materializes the same exact results into preallocated reusable Lists with one QueryContext; no per-query sorting is added unless required by the API. A full warm-up precedes timing. Median elapsed time and median per-thread allocated bytes across rounds; full GC before each sample outside timing. Diagnostic node/primitive counts use a separate untimed pass. Build operations count indexed objects; update operations count moved objects (RTree uses two API calls: Delete+Add). Updates use precreated old/new bounds. Cold move-object uses a fresh index each round; optional steady-move-object alternates forward/backward moves on one tree after two warm cycles, validating outside both timed halves. Static structures do not appear in update rows. Box and precise triangle raycasts are different workloads. KD radius and sorted kNN use a separate point dataset and materializing scan baselines. No concurrency or GPU claims. Shared-host timings are not universal rankings.";
         public List<Row> Results { get; set; } = new List<Row>();
     }
 
@@ -103,7 +105,7 @@ internal static class Program
         internal ProxyHandle[] Handles = Array.Empty<ProxyHandle>();
         internal bool Mutable { get { return Rtree != null || Dynamic != null || Octree != null; } }
 
-        internal int Move(Dataset data)
+        internal int Move(Dataset data, bool forward = true)
         {
             int structural = 0;
             for (int i = 0; i < data.UpdateIds.Length; i++)
@@ -111,16 +113,16 @@ internal static class Program
                 int id = data.UpdateIds[i];
                 if (Dynamic != null)
                 {
-                    if (Dynamic.Move(Handles[id], data.Replacements[i])) structural++;
+                    if (Dynamic.Move(Handles[id], forward ? data.Replacements[i] : data.Boxes[id])) structural++;
                 }
                 else if (Octree != null)
                 {
-                    if (Octree.Move(Handles[id], data.Replacements[i])) structural++;
+                    if (Octree.Move(Handles[id], forward ? data.Replacements[i] : data.Boxes[id])) structural++;
                 }
                 else
                 {
-                    if (!Rtree!.Delete(data.Rectangles[id], id)) throw new InvalidOperationException("RTree update could not delete item " + id);
-                    Rtree.Add(data.ReplacementRectangles[i], id);
+                    if (!Rtree!.Delete(forward ? data.Rectangles[id] : data.ReplacementRectangles[i], id)) throw new InvalidOperationException("RTree update could not delete item " + id);
+                    Rtree.Add(forward ? data.ReplacementRectangles[i] : data.Rectangles[id], id);
                     structural++;
                 }
             }
@@ -144,7 +146,7 @@ internal static class Program
             if (args.Contains("--help"))
             {
                 Console.WriteLine("SpatialPerformance --sizes 10000,100000 --profiles uniform,cluster,mixedsize,planar --queries 128 --rounds 3 --updates 1000 --k 16 --workloads range,box-ray,triangle-ray,kd,update --json results.json");
-                Console.WriteLine("Additional optional workloads: sphere,frustum. Release build required. Set DOTNET_TieredCompilation=0 for stable warmed measurements.");
+                Console.WriteLine("Additional optional workloads: sphere,frustum,steady-update. Release build required. Set DOTNET_TieredCompilation=0 for stable warmed measurements.");
                 return 0;
             }
 #if DEBUG
@@ -198,7 +200,7 @@ internal static class Program
         foreach (string profile in options.Profiles)
             if (!new[] { "uniform", "cluster", "mixedsize", "planar" }.Contains(profile)) throw new ArgumentException("Unknown profile " + profile);
         foreach (string workload in options.Workloads)
-            if (!new[] { "range", "box-ray", "triangle-ray", "kd", "update", "sphere", "frustum" }.Contains(workload)) throw new ArgumentException("Unknown workload " + workload);
+            if (!new[] { "range", "box-ray", "triangle-ray", "kd", "update", "steady-update", "sphere", "frustum" }.Contains(workload)) throw new ArgumentException("Unknown workload " + workload);
         if (options.Profiles.Length == 0 || options.Workloads.Count == 0) throw new ArgumentException("Select at least one profile and workload.");
         return options;
     }
@@ -325,10 +327,11 @@ internal static class Program
         foreach (string kind in new[] { "range", "sphere", "frustum" })
             if (options.Workloads.Contains(kind)) expected[kind] = BoxOracle(data, data.Boxes, kind);
         RayHit<int>[][]? boxHits = options.Workloads.Contains("box-ray") ? RayOracle(data, false) : null;
-        int[][]? updateBefore = options.Workloads.Contains("update") ? (expected.TryGetValue("range", out int[][]? ranges) ? ranges : BoxOracle(data, data.Boxes, "range")) : null;
-        int[][]? updateAfter = options.Workloads.Contains("update") ? BoxOracle(data, data.UpdatedBoxes, "range") : null;
-        int[][]? movedOracle = options.Workloads.Contains("update") ? MovedOracle(data) : null;
-        bool boxWork = expected.Count != 0 || boxHits != null || options.Workloads.Contains("update");
+        bool updates = options.Workloads.Contains("update") || options.Workloads.Contains("steady-update");
+        int[][]? updateBefore = updates ? (expected.TryGetValue("range", out int[][]? ranges) ? ranges : BoxOracle(data, data.Boxes, "range")) : null;
+        int[][]? updateAfter = updates ? BoxOracle(data, data.UpdatedBoxes, "range") : null;
+        int[][]? movedOracle = updates ? MovedOracle(data) : null;
+        bool boxWork = expected.Count != 0 || boxHits != null || updates;
         if (boxWork)
         foreach (string name in new[] { "rtree-str", "dynamic-aabb", "static-sah-bvh", "loose-octree" })
         {
@@ -349,6 +352,7 @@ internal static class Program
                 }
             }
             if (options.Workloads.Contains("update") && index.Mutable) BenchmarkUpdates(report, data, name, options, updateBefore!, updateAfter!, movedOracle!);
+            if (options.Workloads.Contains("steady-update") && index.Mutable) BenchmarkSteadyUpdates(report, data, name, options, updateBefore!, updateAfter!, movedOracle!);
         }
         if (options.Workloads.Contains("triangle-ray"))
         {
@@ -781,6 +785,41 @@ internal static class Program
         GC.KeepAlive(warm);
     }
 
+    private static void BenchmarkSteadyUpdates(Report report, Dataset data, string name, Options options, int[][] before, int[][] after, int[][] movedOracle)
+    {
+        BoxIndex index = BuildBoxes(name, data, true);
+        var context = new QueryContext();
+        QueryCase original = IdCase(data, index.Bounds, "range", before);
+        QueryCase replacement = IdCase(data, index.Bounds, "range", after);
+        for (int warm = 0; warm < 2; warm++) { index.Move(data); index.Move(data, false); }
+        VerifyQueries(original, context, options.Queries);
+        ValidateAll(index.Bounds, data.Boxes.Length);
+        var samples = new List<Sample>(options.Rounds);
+        long structures = 0;
+        for (int round = 0; round < options.Rounds; round++)
+        {
+            FullGc();
+            long allocated = GC.GetAllocatedBytesForCurrentThread(), start = Stopwatch.GetTimestamp();
+            structures += index.Move(data);
+            long elapsed = Stopwatch.GetTimestamp() - start, bytes = GC.GetAllocatedBytesForCurrentThread() - allocated;
+            VerifyQueries(replacement, context, options.Queries);
+            VerifyMovedBounds(index, data, movedOracle);
+            ValidateAll(index.Bounds, data.Boxes.Length);
+
+            allocated = GC.GetAllocatedBytesForCurrentThread(); start = Stopwatch.GetTimestamp();
+            structures += index.Move(data, false);
+            elapsed += Stopwatch.GetTimestamp() - start; bytes += GC.GetAllocatedBytesForCurrentThread() - allocated;
+            samples.Add(new Sample(elapsed * 1000.0 / Stopwatch.Frequency, bytes));
+            VerifyQueries(original, context, options.Queries);
+            VerifyProxyBounds(index, data, false);
+            ValidateAll(index.Bounds, data.Boxes.Length);
+        }
+        Row row = AddRow(report, data, "steady-move-object", name, data.UpdateIds.Length * 2, samples, HashIds(after), print: false);
+        row.ApiCallsPerOperation = name == "rtree-str" ? 2 : 1;
+        row.MeanStructuralChanges = structures / (double)(options.Rounds * data.UpdateIds.Length * 2);
+        Print(row);
+    }
+
     private static int[][] MovedOracle(Dataset data)
     {
         var result = new int[data.UpdateIds.Length][];
@@ -797,6 +836,7 @@ internal static class Program
     private static void VerifyMovedBounds(BoxIndex index, Dataset data, int[][] movedOracle)
     {
         if (index.Bounds.Count != data.Boxes.Length) throw new InvalidOperationException("Move changed index count");
+        VerifyProxyBounds(index, data, true);
         var buffer = new List<int>(data.Boxes.Length);
         var context = new QueryContext();
         // Every moved object is checked at its new location, even if random
@@ -807,6 +847,18 @@ internal static class Program
             Bounds3 target = data.UpdatedBoxes[id];
             index.Bounds.Query(target, buffer, context);
             CheckIds(buffer, movedOracle[q], "Move verification ID " + id);
+        }
+    }
+
+    private static void VerifyProxyBounds(BoxIndex index, Dataset data, bool forward)
+    {
+        if (index.Dynamic == null && index.Octree == null) return;
+        foreach (int id in data.UpdateIds)
+        {
+            Bounds3 actual;
+            bool found = index.Dynamic != null ? index.Dynamic.TryGetBounds(index.Handles[id],out actual) : index.Octree!.TryGetBounds(index.Handles[id],out actual);
+            if (!found || !actual.Equals(forward ? data.UpdatedBoxes[id] : data.Boxes[id]))
+                throw new InvalidOperationException("Moved proxy bound mismatch: " + id);
         }
     }
 

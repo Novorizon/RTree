@@ -11,9 +11,11 @@ namespace RTree
     /// </summary>
     public sealed class DynamicAabbTree<T> : IBoundsQuery3<T>, IRayQuery3<T>
     {
+        // A little height slack permits spatial rotations that strict AVL
+        // balance forbids, while still bounding adversarial insertion depth.
+        private const int MaximumImbalance = 4;
         private struct Node
         {
-            internal Bounds3 Bounds;
             internal int Parent, Left, Right, Height, Slot, NextFree;
         }
 
@@ -21,7 +23,9 @@ namespace RTree
         private readonly ProxyStore<T> proxies = new ProxyStore<T>();
         private readonly double fatMargin;
         private readonly double displacementMultiplier;
+        // Traversal reads bounds first; rejected nodes need no maintenance data.
         private Node[] nodes = new Node[16];
+        private Bounds3[] nodeBounds = new Bounds3[16];
         private int[] nodeBySlot = new int[16];
         private int nextNode;
         private int freeNode = -1;
@@ -83,7 +87,7 @@ namespace RTree
                 int slot = proxies.Allocate(bounds, item);
                 EnsureSlotCapacity(slot);
                 int leaf = AllocateNode();
-                nodes[leaf].Bounds = bounds.Expanded(fatMargin, default(Vector3d), displacementMultiplier);
+                nodeBounds[leaf] = bounds.Expanded(fatMargin, default(Vector3d), displacementMultiplier);
                 nodes[leaf].Slot = slot;
                 nodeBySlot[slot] = leaf;
                 InsertLeaf(leaf);
@@ -108,10 +112,10 @@ namespace RTree
                 if (!proxies.TryResolve(handle, out slot)) throw new ArgumentException("The proxy handle is not live in this tree.", "handle");
                 int leaf = nodeBySlot[slot];
                 proxies.Bounds[slot] = bounds;
-                if (nodes[leaf].Bounds.Contains(bounds)) return false;
+                if (nodeBounds[leaf].Contains(bounds)) return false;
                 if (pairsEnabled) RemovePairs(slot);
                 RemoveLeaf(leaf);
-                nodes[leaf].Bounds = bounds.Expanded(fatMargin, displacement, displacementMultiplier);
+                nodeBounds[leaf] = bounds.Expanded(fatMargin, displacement, displacementMultiplier);
                 InsertLeaf(leaf);
                 if (pairsEnabled) CachePairs(leaf);
                 return true;
@@ -197,16 +201,24 @@ namespace RTree
                     context.Push(root);
                     while (context.stackCount != 0)
                     {
-                        Node node = nodes[context.Pop()];
-                        if (statistics) { context.NodesVisited++; context.EntriesTested++; }
-                        if (!IntersectsVolume(node.Bounds, bounds, sphere, frustum, kind)) continue;
+                        int id = context.Pop();
+                        bool accepted = id < 0;
+                        if (accepted) id = ~id;
+                        if (statistics) context.NodesVisited++;
+                        if (!accepted)
+                        {
+                            if (statistics) context.EntriesTested++;
+                            if (!IntersectsVolume(nodeBounds[id], bounds, sphere, frustum, kind)) continue;
+                            accepted = kind == 0 && bounds.Contains(nodeBounds[id]);
+                        }
+                        Node node = nodes[id];
                         if (node.Left < 0)
                         {
-                            if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (IntersectsVolume(proxies.Bounds[node.Slot], bounds, sphere, frustum, kind))
+                            if (statistics && !accepted) { context.EntriesTested++; context.PrimitiveTests++; }
+                            if (accepted || IntersectsVolume(proxies.Bounds[node.Slot], bounds, sphere, frustum, kind))
                                 results.Add(proxies.Items[node.Slot]);
                         }
-                        else { context.Push(node.Left); context.Push(node.Right); }
+                        else { context.Push(accepted ? ~node.Left : node.Left); context.Push(accepted ? ~node.Right : node.Right); }
                     }
                     context.ResultCount = results.Count;
                     return results.Count;
@@ -244,14 +256,15 @@ namespace RTree
                     context.Push(root);
                     while (context.stackCount != 0)
                     {
-                        Node node = nodes[context.Pop()];
+                        int id = context.Pop();
                         if (statistics) { context.NodesVisited++; context.EntriesTested++; }
                         double near, far;
-                        if (!ray.Intersects(node.Bounds, out near, out far)) continue;
+                        if (!ray.IntersectsUnchecked(nodeBounds[id], out near, out far)) continue;
+                        Node node = nodes[id];
                         if (node.Left < 0)
                         {
                             if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (!ray.Intersects(proxies.Bounds[node.Slot], out near, out far)) continue;
+                            if (!ray.IntersectsUnchecked(proxies.Bounds[node.Slot], out near, out far)) continue;
                             hit = new RayHit<T>(proxies.Items[node.Slot], near);
                             context.ResultCount = 1;
                             return true;
@@ -285,7 +298,7 @@ namespace RTree
                     bool statistics = context.CollectStatistics;
                     double near, far;
                     if (statistics) context.EntriesTested++;
-                    if (!ray.Intersects(nodes[root].Bounds, out near, out far)) return false;
+                    if (!ray.IntersectsUnchecked(nodeBounds[root], out near, out far)) return false;
                     context.Push(root, new DistanceKey(near, 4));
                     bool found = false;
                     double closest = ray.TMax;
@@ -298,7 +311,7 @@ namespace RTree
                         if (node.Left < 0)
                         {
                             if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (ray.Intersects(proxies.Bounds[node.Slot], out near, out far) && near <= closest)
+                            if (ray.IntersectsUnchecked(proxies.Bounds[node.Slot], out near, out far) && near <= closest)
                             {
                                 closest = near;
                                 hit = new RayHit<T>(proxies.Items[node.Slot], near);
@@ -308,9 +321,9 @@ namespace RTree
                         else
                         {
                             if (statistics) context.EntriesTested += 2;
-                            if (ray.Intersects(nodes[node.Left].Bounds, out near, out far) && near <= closest)
+                            if (ray.IntersectsUnchecked(nodeBounds[node.Left], out near, out far) && near <= closest)
                                 context.Push(node.Left, new DistanceKey(near, 4));
-                            if (ray.Intersects(nodes[node.Right].Bounds, out near, out far) && near <= closest)
+                            if (ray.IntersectsUnchecked(nodeBounds[node.Right], out near, out far) && near <= closest)
                                 context.Push(node.Right, new DistanceKey(near, 4));
                         }
                     }
@@ -344,14 +357,15 @@ namespace RTree
                     context.Push(root);
                     while (context.stackCount != 0)
                     {
-                        Node node = nodes[context.Pop()];
+                        int id = context.Pop();
                         if (statistics) { context.NodesVisited++; context.EntriesTested++; }
                         double near, far;
-                        if (!ray.Intersects(node.Bounds, out near, out far)) continue;
+                        if (!ray.IntersectsUnchecked(nodeBounds[id], out near, out far)) continue;
+                        Node node = nodes[id];
                         if (node.Left < 0)
                         {
                             if (statistics) { context.EntriesTested++; context.PrimitiveTests++; }
-                            if (ray.Intersects(proxies.Bounds[node.Slot], out near, out far))
+                            if (ray.IntersectsUnchecked(proxies.Bounds[node.Slot], out near, out far))
                                 results.Add(new RayHit<T>(proxies.Items[node.Slot], near));
                         }
                         else { context.Push(node.Left); context.Push(node.Right); }
@@ -447,7 +461,12 @@ namespace RTree
             if (freeNode >= 0) { id = freeNode; freeNode = nodes[id].NextFree; }
             else
             {
-                if (nextNode == nodes.Length) Array.Resize(ref nodes, checked(nodes.Length * 2));
+                if (nextNode == nodes.Length)
+                {
+                    int capacity = checked(nodes.Length * 2);
+                    Array.Resize(ref nodes, capacity);
+                    Array.Resize(ref nodeBounds, capacity);
+                }
                 id = nextNode++;
             }
             nodes[id] = new Node { Parent = -1, Left = -1, Right = -1, Height = 0, Slot = -1, NextFree = -1 };
@@ -468,28 +487,27 @@ namespace RTree
         private void Refit(int id)
         {
             int left = nodes[id].Left, right = nodes[id].Right;
-            nodes[id].Bounds = Union(nodes[left].Bounds, nodes[right].Bounds);
+            nodeBounds[id] = Union(nodeBounds[left], nodeBounds[right]);
             nodes[id].Height = 1 + Math.Max(nodes[left].Height, nodes[right].Height);
         }
 
         private void InsertLeaf(int leaf)
         {
             if (root < 0) { root = leaf; nodes[leaf].Parent = -1; return; }
-            Bounds3 bounds = nodes[leaf].Bounds;
+            Bounds3 bounds = nodeBounds[leaf];
             int sibling = root;
             while (nodes[sibling].Left >= 0)
             {
                 int left = nodes[sibling].Left, right = nodes[sibling].Right;
-                Aabb box = nodes[sibling].Bounds.Box;
+                Aabb box = nodeBounds[sibling].Box;
                 double growth = box.SurfaceGrowth(bounds.Box);
                 double parentCost = 2 * (box.Surface() + growth);
                 double inheritedCost = 2 * growth;
                 double leftCost = DescentCost(left, bounds) + inheritedCost;
                 double rightCost = DescentCost(right, bounds) + inheritedCost;
-                // Stopping above a tall subtree can introduce an arbitrary
-                // height jump. Keep the new parent balanced at construction,
-                // so a single local rotation per ancestor remains sufficient.
-                if (nodes[sibling].Height <= 1 && parentCost < leftCost && parentCost < rightCost) break;
+                // A large object can be a better sibling of a whole subtree.
+                // Forcing descent to a leaf creates broad overlapping branches.
+                if (nodes[sibling].Height <= MaximumImbalance && parentCost < leftCost && parentCost < rightCost) break;
                 if (leftCost == rightCost) sibling = nodes[left].Height < nodes[right].Height ? left : right;
                 else sibling = leftCost < rightCost ? left : right;
             }
@@ -504,12 +522,12 @@ namespace RTree
             if (oldParent < 0) root = parent;
             else if (nodes[oldParent].Left == sibling) nodes[oldParent].Left = parent;
             else nodes[oldParent].Right = parent;
-            RefitAncestors(parent);
+            RefitAncestors(parent, true);
         }
 
         private double DescentCost(int node, Bounds3 bounds)
         {
-            Aabb box = nodes[node].Bounds.Box;
+            Aabb box = nodeBounds[node].Box;
             return nodes[node].Left < 0 ? box.Surface() + box.SurfaceGrowth(bounds.Box) : box.SurfaceGrowth(bounds.Box);
         }
 
@@ -528,15 +546,17 @@ namespace RTree
             }
             ReleaseNode(parent);
             nodes[leaf].Parent = -1;
-            if (grandparent >= 0) RefitAncestors(grandparent);
+            if (grandparent >= 0) RefitAncestors(grandparent, false);
         }
 
-        private void RefitAncestors(int node)
+        private void RefitAncestors(int node, bool improve)
         {
             while (node >= 0)
             {
                 Refit(node);
+                int previous = node;
                 node = Balance(node);
+                if (improve || node != previous) ImproveArea(node);
                 node = nodes[node].Parent;
             }
         }
@@ -549,13 +569,15 @@ namespace RTree
             if (nodes[a].Left < 0 || nodes[a].Height < 2) return a;
             int b = nodes[a].Left, c = nodes[a].Right;
             int difference = nodes[c].Height - nodes[b].Height;
-            if (difference > 1)
+            if (difference > MaximumImbalance)
             {
                 int f = nodes[c].Left, g = nodes[c].Right;
                 ReplaceAtParent(a, c);
                 nodes[c].Left = a;
                 nodes[a].Parent = c;
-                if (nodes[f].Height > nodes[g].Height)
+                if (nodes[f].Height > nodes[g].Height ||
+                    (nodes[f].Height == nodes[g].Height &&
+                     Union(nodeBounds[b], nodeBounds[g]).Box.Surface() < Union(nodeBounds[b], nodeBounds[f]).Box.Surface()))
                 {
                     nodes[c].Right = f; nodes[f].Parent = c;
                     nodes[a].Right = g; nodes[g].Parent = a;
@@ -568,13 +590,15 @@ namespace RTree
                 Refit(a); Refit(c);
                 return c;
             }
-            if (difference < -1)
+            if (difference < -MaximumImbalance)
             {
                 int d = nodes[b].Left, e = nodes[b].Right;
                 ReplaceAtParent(a, b);
                 nodes[b].Left = a;
                 nodes[a].Parent = b;
-                if (nodes[d].Height > nodes[e].Height)
+                if (nodes[d].Height > nodes[e].Height ||
+                    (nodes[d].Height == nodes[e].Height &&
+                     Union(nodeBounds[c], nodeBounds[e]).Box.Surface() < Union(nodeBounds[c], nodeBounds[d]).Box.Surface()))
                 {
                     nodes[b].Right = d; nodes[d].Parent = b;
                     nodes[a].Left = e; nodes[e].Parent = a;
@@ -588,6 +612,51 @@ namespace RTree
                 return b;
             }
             return a;
+        }
+
+        // Exchange an aunt with a grandchild when that reduces the changed
+        // branch's area. The top bound is unchanged. Height constraints retain
+        // the bounded imbalance without imposing an ordering on BVH leaves.
+        private void ImproveArea(int a)
+        {
+            int b = nodes[a].Left, c = nodes[a].Right;
+            if (b < 0) return;
+            int branch = -1, inside = -1;
+            double best = 0;
+            if (nodes[b].Left >= 0)
+            {
+                ConsiderRotation(a, b, c, nodes[b].Left, nodes[b].Right, ref branch, ref inside, ref best);
+                ConsiderRotation(a, b, c, nodes[b].Right, nodes[b].Left, ref branch, ref inside, ref best);
+            }
+            if (nodes[c].Left >= 0)
+            {
+                ConsiderRotation(a, c, b, nodes[c].Left, nodes[c].Right, ref branch, ref inside, ref best);
+                ConsiderRotation(a, c, b, nodes[c].Right, nodes[c].Left, ref branch, ref inside, ref best);
+            }
+            if (branch < 0) return;
+            int outside = branch == b ? c : b;
+            if (nodes[branch].Left == inside) nodes[branch].Left = outside;
+            else nodes[branch].Right = outside;
+            if (branch == b) nodes[a].Right = inside;
+            else nodes[a].Left = inside;
+            nodes[outside].Parent = branch;
+            nodes[inside].Parent = a;
+            Refit(branch); Refit(a);
+        }
+
+        private void ConsiderRotation(int a, int branch, int outside, int inside, int retained,
+            ref int bestBranch, ref int bestInside, ref double best)
+        {
+            int branchHeight = 1 + Math.Max(nodes[outside].Height, nodes[retained].Height);
+            if (Math.Abs(nodes[outside].Height - nodes[retained].Height) > MaximumImbalance ||
+                Math.Abs(branchHeight - nodes[inside].Height) > MaximumImbalance ||
+                1 + Math.Max(branchHeight, nodes[inside].Height) > nodes[a].Height) return;
+            Aabb previous = nodeBounds[branch].Box;
+            Aabb replacement = Aabb.Union(nodeBounds[outside].Box, nodeBounds[retained].Box);
+            double oldArea = previous.Surface(), newArea = replacement.Surface();
+            double gain = oldArea - newArea;
+            if ((oldArea == 0 && newArea == 0) || double.IsNaN(gain)) gain = previous.Margin() - replacement.Margin();
+            if (gain > best) { best = gain; bestBranch = branch; bestInside = inside; }
         }
 
         private void ReplaceAtParent(int oldChild, int newChild)
@@ -642,12 +711,12 @@ namespace RTree
         {
             writerStackCount = 0;
             PushWriter(root);
-            Bounds3 bounds = nodes[leaf].Bounds;
+            Bounds3 bounds = nodeBounds[leaf];
             int slot = nodes[leaf].Slot;
             while (writerStackCount != 0)
             {
                 int id = writerStack[--writerStackCount];
-                if (id == leaf || !nodes[id].Bounds.Intersects(bounds)) continue;
+                if (id == leaf || !nodeBounds[id].Intersects(bounds)) continue;
                 if (nodes[id].Left < 0) AddPair(slot, nodes[id].Slot);
                 else { PushWriter(nodes[id].Left); PushWriter(nodes[id].Right); }
             }

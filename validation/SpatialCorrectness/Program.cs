@@ -20,7 +20,10 @@ internal static class Program
         Run("geometry and boundary queries", Boundaries, ref failures);
         Run("randomized box indexes and RTree adapter", RandomBoxes, ref failures);
         Run("dynamic AABB handles, updates and pairs", DynamicUpdates, ref failures);
+        Run("dynamic AABB ordered, nested and moving objects", DynamicAdversarial, ref failures);
         Run("loose octree ownership, expansion and updates", OctreeUpdates, ref failures);
+        Run("subtree pruning and movement outside cached content bounds", PruningAndMovement, ref failures);
+        Run("scaled and cancelling frustum planes", FrustumPrecision, ref failures);
         Run("static BVH refit/rebuild", StaticUpdates, ref failures);
         Run("triangle BVH exact ray queries", Triangles, ref failures);
         Run("triangle precision regressions", TrianglePrecision, ref failures);
@@ -353,6 +356,77 @@ internal static class Program
         }
     }
 
+    private static void PruningAndMovement()
+    {
+        var octree = new LooseOctree<int>(new Bounds3(-1024,-1024,-1024,1024,1024,1024),12,2,false);
+        var dynamic = new DynamicAabbTree<int>();
+        var data = new List<Entry>();
+        ProxyHandle moving = default;
+        for (int i = 0; i < 256; i++)
+        {
+            double x = (i % 16) * .01, y = (i / 16) * .01;
+            var box = new Box(x,y,0,x+.001,y+.001,.001);
+            data.Add(new Entry(box,i));
+            var handle = octree.Insert(box.Bounds,i);
+            if (i == 0) moving = handle;
+            dynamic.Insert(box.Bounds,i);
+        }
+        var results = new List<int>(); var context = new QueryContext(true);
+        octree.Query(new Bounds3(900,900,900,901,901,901),results,context);
+        Check(results.Count == 0 && context.NodesVisited == 1,"content bounds reject empty world regions at root");
+        var all = new Bounds3(-2048,-2048,-2048,2048,2048,2048);
+        var bvh = new StaticBvh<int>(BoxSource(data));
+        foreach (IBoundsQuery3<int> index in new IBoundsQuery3<int>[] {octree,dynamic,bvh})
+        {
+            index.Query(all,results,context);
+            Items(results,Enumerable.Range(0,256),"complete subtree inclusion preserves all items");
+            Check(context.PrimitiveTests == 0,"contained subtree avoids primitive predicates");
+        }
+        // This stays inside the original loose owner but leaves its original
+        // content bound. Repeating it in both directions detects stale bounds.
+        foreach (double x in new[] {-.001,0.0,-.002,0.0})
+        {
+            var box = new Box(x,0,0,x+.001,.001,.001);
+            Check(!octree.Move(moving,box.Bounds),"small move retains loose owner");
+            data[0] = new Entry(box,0);
+            octree.Query(box.Bounds,results,context);
+            Items(results,data.Where(e=>Overlap(e.Box,box)).Select(e=>e.Item),"moved object expands content bounds through ancestors");
+            var ray = new Ray(V(x,.0005,-1),V(0,0,1));
+            var expected = new List<Hit>();
+            foreach (Entry e in data) if (RayBox(e.Box,ray,out double t)) expected.Add(new Hit(e.Item,t));
+            RayChecks("ray after in-cell move",octree,ray,expected,context);
+        }
+        Check(octree.Remove(moving),"remove moved proxy"); data.RemoveAt(0);
+        octree.Rebuild();
+        BoxChecks("rebuilt content bounds",octree,octree,data,8,91214);
+        octree.Insert(new Bounds3(-800,-800,-800,-799,-799,-799),999);
+        octree.Query(new Bounds3(-801,-801,-801,-798,-798,-798),results,context);
+        Items(results,new[] {999},"recycled nodes reset content bounds");
+        // Large late insertions must not hide the small leaves below them.
+        dynamic.Insert(new Bounds3(-1000,-1000,-1000,1000,1000,1000),1000);
+        dynamic.Query(new Bounds3(.02,.02,0,.021,.021,.001),results,context);
+        Items(results,data.Where(e=>Overlap(e.Box,new Box(.02,.02,0,.021,.021,.001))).Select(e=>e.Item).Append(1000),"large sibling insertion preserves small leaves");
+    }
+
+    private static void FrustumPrecision()
+    {
+        foreach (double scale in new[] {1e-300,1.0,1e300})
+        {
+            var volume = new Frustum3(new Plane3(V(scale,0,0),scale),new Plane3(V(-scale,0,0),scale),
+                new Plane3(V(0,scale,0),scale),new Plane3(V(0,-scale,0),scale),
+                new Plane3(V(0,0,scale),scale),new Plane3(V(0,0,-scale),scale));
+            Check(volume.Intersects(new Bounds3(-.5,-.5,-.5,.5,.5,.5)),"scaled frustum inside");
+            Check(volume.Intersects(new Bounds3(1,-1,-1,2,1,1)),"scaled frustum touching plane");
+            Check(!volume.Intersects(new Bounds3(2,-1,-1,3,1,1)),"scaled frustum outside");
+            // Dot-product cancellation at a non-axis-aligned plane must retain
+            // touching points, even when large products cancel exactly.
+            var oblique = new Frustum3(new Plane3(V(scale,-scale,0),0),volume.GetPlane(1),
+                volume.GetPlane(2),volume.GetPlane(3),volume.GetPlane(4),volume.GetPlane(5));
+            Check(oblique.Intersects(new Bounds3(.5,.5,0,.5,.5,0)),"cancelling plane keeps contact");
+            Check(!oblique.Intersects(new Bounds3(0,.5,0,0,.5,0)),"cancelling plane rejects clear outside");
+        }
+    }
+
     private sealed class Live
     {
         internal ProxyHandle Handle;
@@ -411,6 +485,42 @@ internal static class Program
             }
         }
         PairChecks(tree,live,context,pairs);
+    }
+
+    private static void DynamicAdversarial()
+    {
+        int count = quick ? 256 : 4096;
+        foreach (string profile in new[] {"sorted","reverse","nested"})
+        {
+            var tree = new DynamicAabbTree<int>(0,0);
+            var handles = new ProxyHandle[count]; var boxes = new Box[count];
+            for (int i = 0; i < count; i++)
+            {
+                double x = profile == "reverse" ? count-i : i;
+                boxes[i] = profile == "nested" ? new Box(-x,-x,-x,x+.25,x+.25,x+.25) : new Box(x,0,0,x+.25,0,0);
+                handles[i] = tree.Insert(boxes[i].Bounds,i);
+            }
+            var buffer = new List<int>(); var context = new QueryContext(true);
+            var probe = new Box(count/2.0,0,0,count/2.0,0,0);
+            tree.Query(probe.Bounds,buffer,context);
+            Items(buffer,Enumerable.Range(0,count).Where(i=>Overlap(boxes[i],probe)),"ordered/nested insertion query");
+            if (profile != "nested") Check(context.NodesVisited < count/2,"ordered line inserts retain useful pruning");
+            for (int i = 0; i < count; i += 3)
+            {
+                boxes[i] = boxes[i].Shift(count*2,1,0);
+                tree.Move(handles[i],boxes[i].Bounds);
+            }
+            for (int i = 0; i < count; i += Math.Max(1,count/16))
+            {
+                tree.Query(boxes[i].Bounds,buffer,context);
+                Items(buffer,Enumerable.Range(0,count).Where(j=>Overlap(boxes[j],boxes[i])),"ordered/nested move preserves descendants");
+            }
+            for (int i = count-1; i >= 0; i--) Check(tree.Remove(handles[i]),"ordered/nested drain");
+            Check(tree.Count == 0,"drained dynamic root");
+            tree.Insert(new Bounds3(0,0,0,1,1,1),999);
+            tree.Query(new Bounds3(0,0,0,1,1,1),buffer,context);
+            Items(buffer,new[] {999},"dynamic pools reused after drain");
+        }
     }
 
     private static bool Same(Bounds3 bounds,Box b) => bounds.MinX==b.X0&&bounds.MinY==b.Y0&&bounds.MinZ==b.Z0&&bounds.MaxX==b.X1&&bounds.MaxY==b.Y1&&bounds.MaxZ==b.Z1;
