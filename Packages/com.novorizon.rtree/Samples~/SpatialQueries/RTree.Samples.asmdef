@@ -1,0 +1,6 @@
+{
+  "name": "RTree.Samples",
+  "references": [
+    "RTree"
+  ]
+}

@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>RTree</AssemblyName>
     <RootNamespace>RTree</RootNamespace>
@@ -7,4 +8,5 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
   </PropertyGroup>
+  <ItemGroup><Compile Include="../Packages/com.novorizon.rtree/Runtime/*.cs" /></ItemGroup>
 </Project>

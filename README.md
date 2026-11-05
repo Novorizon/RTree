@@ -1,5 +1,9 @@
 # RTree
 
+本轮验证：[UPM 验证记录](docs/UnityPackageValidation.md)。
+
+Unity 安装入口：[UPM 包说明](Packages/com.novorizon.rtree/README.md)。通过 Git URL 的 `?path=/Packages/com.novorizon.rtree` 安装；运行时源码统一位于该包的 Runtime 目录，原 .NET 项目和回归项目直接引用同一份源码。
+
 In-memory 3D spatial indexes: RTree, dynamic AABB tree, static/triangle BVH,
 loose octree and point KD-tree. The library preserves its existing RTree public
 API and .NET Framework 4.5 project, and provides a .NET 8 library project.
