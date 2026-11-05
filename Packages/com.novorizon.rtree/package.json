@@ -1,6 +1,6 @@
 {
   "name": "com.novorizon.rtree",
-  "version": "1.0.0-preview.1",
+  "version": "1.0.0-preview.2",
   "displayName": "Novorizon Spatial Indexes",
   "description": "Unity 3D spatial queries using RTree, dynamic AABB, BVH, octree and KD indexes.",
   "unity": "2022.3",

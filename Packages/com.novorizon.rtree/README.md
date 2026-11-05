@@ -2,6 +2,24 @@
 
 UPM 包 `com.novorizon.rtree`，Unity 2022.3+，公开程序集和命名空间保持 `RTree`。包含 RTree、DynamicAabbTree、StaticBvh、TriangleBvh、LooseOctree 和 KdTree；算法与旧 API 保持不变。
 
+
+## 源码目录
+
+```text
+Runtime/
+  Common/           # 公共接口、几何、精确三角形计算与查询工作区
+  RTree/            # R-tree、适配器与兼容节点
+  DynamicAabbTree/   # 动态 AABB 树
+  StaticBvh/         # 静态 BVH
+  TriangleBvh/       # 三角形 BVH
+  LooseOctree/       # 松散八叉树
+  KdTree/            # KD 树
+  Grid/              # 独立格子索引归属；当前尚无算法实现
+  RTree.asmdef
+```
+
+各类结构分别归档，仍编入一个 RTree 程序集。命名空间、公开接口和已有源码 .meta GUID 保持不变。Grid 目录的说明不代表已经新增格子算法。
+
 ## 安装
 
 通过 Package Manager → Add package from git URL：

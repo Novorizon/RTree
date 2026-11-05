@@ -15,7 +15,9 @@ for path in assets:
         text+='  userData:\n  assetBundleName:\n  assetBundleVariant:\n';meta.write_text(text)
     assert meta.exists(),path
 assert json.loads((p/'Runtime/RTree.asmdef').read_text())['references']==[]
-assert len(list((p/'Runtime').glob('*.cs')))==19
+assert len(list((p/'Runtime').rglob('*.cs')))==19
+assert not list((p/'Runtime').glob('*.cs'))
+assert {x.name for x in (p/'Runtime').iterdir() if x.is_dir()}=={'Common','RTree','DynamicAabbTree','StaticBvh','TriangleBvh','LooseOctree','KdTree','Grid'}
 if a.output:
     a.output.parent.mkdir(parents=True,exist_ok=True)
     with a.output.open('wb') as target,gzip.GzipFile(fileobj=target,mode='wb',filename='',mtime=0) as z,tarfile.open(fileobj=z,mode='w') as tar:

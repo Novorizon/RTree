@@ -2,6 +2,8 @@
 
 本轮验证：[UPM 验证记录](docs/UnityPackageValidation.md)。
 
+源码已按每种树独立目录归档，共用类型位于 `Runtime/Common`，格子归属单独放在 `Runtime/Grid`（当前未实现）。
+
 Unity 安装入口：[UPM 包说明](Packages/com.novorizon.rtree/README.md)。通过 Git URL 的 `?path=/Packages/com.novorizon.rtree` 安装；运行时源码统一位于该包的 Runtime 目录，原 .NET 项目和回归项目直接引用同一份源码。
 
 In-memory 3D spatial indexes: RTree, dynamic AABB tree, static/triangle BVH,
