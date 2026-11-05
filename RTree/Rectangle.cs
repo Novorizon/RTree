@@ -24,7 +24,7 @@ namespace RTree
 {
 
     /**
-     * Currently hardcoded to 2 dimensions, but could be extended.
+     * An axis-aligned box in three dimensions.
      * 
      * @author  aled@sourceforge.net
      * @version 1.0b2p1
@@ -38,12 +38,12 @@ namespace RTree
         internal const int DIMENSIONS = 3;
 
         /**
-         * array containing the minimum value for each dimension; ie { min(x), min(y) }
+         * Maximum value for each dimension: { max(x), max(y), max(z) }.
          */
         internal double[] max;
 
         /**
-         * array containing the maximum value for each dimension; ie { max(x), max(y) }
+         * Minimum value for each dimension: { min(x), min(y), min(z) }.
          */
         internal double[] min;
 
@@ -70,10 +70,20 @@ namespace RTree
          */
         public Rectangle(double[] min, double[] max)
         {
-            if (min.Length != DIMENSIONS || max.Length != DIMENSIONS)
+            if (min == null)
+                throw new ArgumentNullException("min");
+            if (max == null)
+                throw new ArgumentNullException("max");
+            if (min.Length != DIMENSIONS)
+                throw new ArgumentException("Bounds must have three coordinates.", "min");
+            if (max.Length != DIMENSIONS)
+                throw new ArgumentException("Bounds must have three coordinates.", "max");
+            for (int i = 0; i < DIMENSIONS; i++)
             {
-                throw new Exception("Error in Rectangle constructor: " +
-                          "min and max arrays must be of length " + DIMENSIONS);
+                ValidateCoordinate(min[i], "min");
+                ValidateCoordinate(max[i], "max");
+                if (min[i] > max[i])
+                    throw new ArgumentException("Each minimum must be less than or equal to its maximum.", "min");
             }
 
             this.min = new double[DIMENSIONS];
@@ -92,12 +102,24 @@ namespace RTree
           */
         internal void set(double x1, double y1, double x2, double y2, double z1, double z2)
         {
+            ValidateCoordinate(x1, "x1");
+            ValidateCoordinate(y1, "y1");
+            ValidateCoordinate(x2, "x2");
+            ValidateCoordinate(y2, "y2");
+            ValidateCoordinate(z1, "z1");
+            ValidateCoordinate(z2, "z2");
             min[0] = Math.Min(x1, x2);
             min[1] = Math.Min(y1, y2);
             min[2] = Math.Min(z1, z2);
             max[0] = Math.Max(x1, x2);
             max[1] = Math.Max(y1, y2);
             max[2] = Math.Max(z1, z2);
+        }
+
+        internal static void ValidateCoordinate(double value, string parameterName)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                throw new ArgumentException("Coordinates must be finite.", parameterName);
         }
 
         /**
@@ -209,17 +231,18 @@ namespace RTree
          */
         internal double distance(Point p)
         {
-            double distanceSquared = 0;
-            for (int i = 0; i < DIMENSIONS; i++)
-            {
-                double greatestMin = Math.Max(min[i], p.coordinates[i]);
-                double leastMax = Math.Min(max[i], p.coordinates[i]);
-                if (greatestMin > leastMax)
-                {
-                    distanceSquared += ((greatestMin - leastMax) * (greatestMin - leastMax));
-                }
-            }
-            return (double)Math.Sqrt(distanceSquared);
+            return Norm(PointGap(min[0], max[0], p.coordinates[0]),
+                        PointGap(min[1], max[1], p.coordinates[1]),
+                        PointGap(min[2], max[2], p.coordinates[2]));
+        }
+
+        // Used to compare distances larger than double.MaxValue. Scaling the
+        // coordinates before subtracting also prevents gap overflow.
+        internal double distanceScaled(Point p, double scale)
+        {
+            return Norm(PointGap(min[0] * scale, max[0] * scale, p.coordinates[0] * scale),
+                        PointGap(min[1] * scale, max[1] * scale, p.coordinates[1] * scale),
+                        PointGap(min[2] * scale, max[2] * scale, p.coordinates[2] * scale));
         }
 
         /**
@@ -233,17 +256,43 @@ namespace RTree
 
         internal double distance(Rectangle r)
         {
-            double distanceSquared = 0;
-            for (int i = 0; i < DIMENSIONS; i++)
-            {
-                double greatestMin = Math.Max(min[i], r.min[i]);
-                double leastMax = Math.Min(max[i], r.max[i]);
-                if (greatestMin > leastMax)
-                {
-                    distanceSquared += ((greatestMin - leastMax) * (greatestMin - leastMax));
-                }
-            }
-            return (double)Math.Sqrt(distanceSquared);
+            return Norm(IntervalGap(min[0], max[0], r.min[0], r.max[0]),
+                        IntervalGap(min[1], max[1], r.min[1], r.max[1]),
+                        IntervalGap(min[2], max[2], r.min[2], r.max[2]));
+        }
+
+        private static double PointGap(double minimum, double maximum, double point)
+        {
+            if (point < minimum)
+                return minimum - point;
+            if (point > maximum)
+                return point - maximum;
+            return 0;
+        }
+
+        private static double IntervalGap(double min1, double max1, double min2, double max2)
+        {
+            if (max1 < min2)
+                return min2 - max1;
+            if (max2 < min1)
+                return min1 - max2;
+            return 0;
+        }
+
+        private static double Norm(double x, double y, double z)
+        {
+            double squared = x * x + y * y + z * z;
+            if (!double.IsInfinity(squared) && squared >= 2.2250738585072014e-308)
+                return Math.Sqrt(squared);
+
+            // Scaling preserves distances whose squares overflow or underflow.
+            double scale = Math.Max(x, Math.Max(y, z));
+            if (scale == 0 || double.IsInfinity(scale))
+                return scale;
+            x /= scale;
+            y /= scale;
+            z /= scale;
+            return scale * Math.Sqrt(x * x + y * y + z * z);
         }
 
         /**
@@ -251,18 +300,8 @@ namespace RTree
          */
         internal double distanceSquared(int dimension, double point)
         {
-            double distanceSquared = 0;
-            double tempDistance = point - max[dimension];
-            for (int i = 0; i < 2; i++)
-            {
-                if (tempDistance > 0)
-                {
-                    distanceSquared = (tempDistance * tempDistance);
-                    break;
-                }
-                tempDistance = min[dimension] - point;
-            }
-            return distanceSquared;
+            double gap = PointGap(min[dimension], max[dimension], point);
+            return gap * gap;
         }
 
         /**
@@ -275,20 +314,13 @@ namespace RTree
          */
         internal double furthestDistance(Rectangle r)
         {
-            double distanceSquared = 0;
-
-            for (int i = 0; i < DIMENSIONS; i++)
-            {
-                distanceSquared += Math.Max(r.min[i], r.max[i]);
-                #warning possible didn't convert properly
-                //distanceSquared += Math.Max(distanceSquared(i, r.min[i]), distanceSquared(i, r.max[i]));
-            }
-
-            return (double)Math.Sqrt(distanceSquared);
+            return Norm(Math.Max(PointGap(min[0], max[0], r.min[0]), PointGap(min[0], max[0], r.max[0])),
+                        Math.Max(PointGap(min[1], max[1], r.min[1]), PointGap(min[1], max[1], r.max[1])),
+                        Math.Max(PointGap(min[2], max[2], r.min[2]), PointGap(min[2], max[2], r.max[2])));
         }
 
         /**
-         * Calculate the area by which this rectangle would be enlarged if
+         * Calculate the volume by which this box would be enlarged if
          * added to the passed rectangle. Neither rectangle is altered.
          * 
          * @param r Rectangle to union with this rectangle, in order to 
@@ -297,20 +329,84 @@ namespace RTree
          */
         internal double enlargement(Rectangle r)
         {
-            double enlargedArea = (Math.Max(max[0], r.max[0]) - Math.Min(min[0], r.min[0])) *
-                                 (Math.Max(max[1], r.max[1]) - Math.Min(min[1], r.min[1]));
+            double x = max[0] - min[0];
+            double y = max[1] - min[1];
+            double z = max[2] - min[2];
+            double growX = Math.Max(0, min[0] - r.min[0]) + Math.Max(0, r.max[0] - max[0]);
+            double growY = Math.Max(0, min[1] - r.min[1]) + Math.Max(0, r.max[1] - max[1]);
+            double growZ = Math.Max(0, min[2] - r.min[2]) + Math.Max(0, r.max[2] - max[2]);
 
-            return enlargedArea - area();
+            // Expand one axis at a time instead of subtracting two volumes.
+            // This avoids infinity - infinity and 0 * infinity for large or
+            // degenerate boxes, keeping every insertion cost nonnegative.
+            return Product(growX, y + growY, z + growZ) +
+                   Product(x, growY, z + growZ) +
+                   Product(x, y, growZ);
         }
 
         /**
-         * Compute the area of this rectangle.
+         * Compute the volume of this three-dimensional box.
          * 
          * @return The area of this rectangle
          */
         internal double area()
         {
-            return (max[0] - min[0]) * (max[1] - min[1]);
+            return Product(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+        }
+
+        // Secondary insertion costs distinguish planar and linear boxes whose
+        // volumes are all zero. The factor of two in surface area is omitted.
+        internal double surfaceArea()
+        {
+            double x = max[0] - min[0];
+            double y = max[1] - min[1];
+            double z = max[2] - min[2];
+            return Product(x, y) + Product(x, z) + Product(y, z);
+        }
+
+        internal double surfaceEnlargement(Rectangle r)
+        {
+            double x = max[0] - min[0];
+            double y = max[1] - min[1];
+            double z = max[2] - min[2];
+            double growX = Math.Max(0, min[0] - r.min[0]) + Math.Max(0, r.max[0] - max[0]);
+            double growY = Math.Max(0, min[1] - r.min[1]) + Math.Max(0, r.max[1] - max[1]);
+            double growZ = Math.Max(0, min[2] - r.min[2]) + Math.Max(0, r.max[2] - max[2]);
+            return Product(growX, y + growY) + Product(x, growY) +
+                   Product(growX, z + growZ) + Product(x, growZ) +
+                   Product(growY, z + growZ) + Product(y, growZ);
+        }
+
+        internal double margin()
+        {
+            return (max[0] - min[0]) + (max[1] - min[1]) + (max[2] - min[2]);
+        }
+
+        internal double marginEnlargement(Rectangle r)
+        {
+            return Math.Max(0, min[0] - r.min[0]) + Math.Max(0, r.max[0] - max[0]) +
+                   Math.Max(0, min[1] - r.min[1]) + Math.Max(0, r.max[1] - max[1]) +
+                   Math.Max(0, min[2] - r.min[2]) + Math.Max(0, r.max[2] - max[2]);
+        }
+
+        private static double Product(double x, double y)
+        {
+            return x == 0 || y == 0 ? 0 : x * y;
+        }
+
+        private static double Product(double x, double y, double z)
+        {
+            double product = (x * y) * z;
+            if (product > 0 && !double.IsInfinity(product))
+                return product;
+            if (x == 0 || y == 0 || z == 0)
+                return 0;
+            // Multiply the smallest and largest finite factors first so an
+            // intermediate product cannot overflow when the result fits.
+            if (x > y) { double temp = x; x = y; y = temp; }
+            if (y > z) { double temp = y; y = z; z = temp; }
+            if (x > y) { double temp = x; x = y; y = temp; }
+            return (x * z) * y;
         }
 
         /**
@@ -368,17 +464,23 @@ namespace RTree
          */
         public override bool Equals(object obj)
         {
-            bool equals = false;
-            if (obj.GetType() == typeof(Rectangle))
+            Rectangle r = obj as Rectangle;
+            return r != null && r.GetType() == GetType() &&
+                   CompareArrays(r.min, min) && CompareArrays(r.max, max);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
             {
-                Rectangle r = (Rectangle)obj;
-#warning possible didn't convert properly
-                if (CompareArrays(r.min, min) && CompareArrays(r.max, max))
+                int hash = 17;
+                for (int i = 0; i < DIMENSIONS; i++)
                 {
-                    equals = true;
+                    hash = hash * 31 + (min[i] == 0 ? 0d : min[i]).GetHashCode();
+                    hash = hash * 31 + (max[i] == 0 ? 0d : max[i]).GetHashCode();
                 }
+                return hash;
             }
-            return equals;
         }
 
         /** 

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <SourceDirectory Condition="'$(SourceDirectory)' == ''">$(MSBuildProjectDirectory)/../../RTree</SourceDirectory>
+    <DefineConstants Condition="'$(OptimizedApi)' == 'true'">$(DefineConstants);OPTIMIZED_API</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(SourceDirectory)/*.cs" Link="RTree/%(Filename)%(Extension)" />
+    <Compile Include="Program.cs" />
+    <Compile Include="AdvancedBenchmark.cs" />
+    <AssemblyMetadata Include="RTreeSourceDirectory" Value="$(SourceDirectory)" />
+  </ItemGroup>
+</Project>

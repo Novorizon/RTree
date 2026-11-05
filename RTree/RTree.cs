@@ -19,1041 +19,641 @@
 
 //  Ported to C# By Dror Gluska, April 9th, 2009
 //  Updated by Boris Kudryashov, January 29, 2014
-using System.Collections.Generic;
 using System;
-using System.Collections;
-
+using System.Collections.Generic;
+using System.Threading;
 
 namespace RTree
 {
+    // Metadata and entries contain inline value boxes, never Rectangle objects.
+    internal struct TreeNode
+    {
+        internal Aabb Bounds;
+        internal int Count, Level;
+        internal bool Live;
+    }
+
+    internal struct TreeEntry
+    {
+        internal Aabb Bounds;
+        internal int Id;
+        internal TreeEntry(Aabb bounds, int id) { Bounds = bounds; Id = id; }
+    }
 
     /// <summary>
-    /// This is a lightweight RTree implementation, specifically designed 
-    /// for the following features (in order of importance): 
-    ///
-    /// Fast intersection query performance. To achieve this, the RTree 
-    /// uses only main memory to store entries. Obviously this will only improve
-    /// performance if there is enough physical memory to avoid paging.
-    /// Low memory requirements.
-    /// Fast add performance.
-    ///
-    ///
-    /// The main reason for the high speed of this RTree implementation is the 
-    /// avoidance of the creation of unnecessary objects, mainly achieved by using
-    /// primitive collections from the trove4j library.
-    /// author aled@sourceforge.net
-    /// version 1.0b2p1
-    /// Ported to C# By Dror Gluska, April 9th, 2009
+    /// A three-dimensional in-memory R-tree. Readers may query one instance
+    /// concurrently; writers are serialized and exclude readers. Item equality
+    /// and hash codes must remain stable while the item is indexed.
     /// </summary>
-    /// <typeparam name="T"></typeparam>
-    public class RTree<T>
+    public partial class RTree<T>
     {
         private const string version = "1.0b2p1";
+        private const int DefaultCapacity = 10;
+        internal int maxNodeEntries, minNodeEntries;
+        private TreeNode[] nodes;
+        private TreeEntry[] entries;
+        private T[] itemValues;
+        private bool[] itemLive;
+        private Dictionary<T, int> itemIds = new Dictionary<T, int>();
+        private int nextNodeId, nextItemId, rootNodeId, treeHeight = 1, msize;
+        private Stack<int> freeNodeIds = new Stack<int>();
+        private Stack<int> freeItemIds = new Stack<int>();
+        private readonly ReaderWriterLockSlim sync = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
 
-        // parameters of the tree
-        private const int DEFAULT_MAX_NODE_ENTRIES = 10;
-        internal int maxNodeEntries;
-        int minNodeEntries;
+        // One writer owns these reusable split buffers. No per-entry geometry
+        // objects or per-split comparison delegates are allocated.
+        private TreeEntry[] splitEntries;
+        private int[] splitOrder, bestOrder;
+        private Aabb[] prefixBounds, suffixBounds;
+        private SplitComparer splitComparer;
+        // A single writer owns deletion scratch just as it owns split scratch.
+        // Capacity is retained across calls; entries contain no item references.
+        private readonly List<int> deletePath = new List<int>(8);
+        private readonly List<int> deletePathEntries = new List<int>(8);
+        private readonly List<OrphanEntry> deleteOrphans = new List<OrphanEntry>(16);
 
-        // map of nodeId -&gt; Node&lt;T&gt; object
-        // [x] TODO eliminate this map - it should not be needed. Nodes
-        // can be found by traversing the tree.
-        //private TIntObjectHashMap nodeMap = new TIntObjectHashMap();
-        private Dictionary<int, Node<T>> nodeMap = new Dictionary<int, Node<T>>();
+        public RTree() : this(DefaultCapacity, DefaultCapacity / 2) { }
 
-        // used to mark the status of entries during a Node&lt;T&gt; split
-        private const int ENTRY_STATUS_ASSIGNED = 0;
-        private const int ENTRY_STATUS_UNASSIGNED = 1;
-        private byte[] entryStatus = null;
-        private byte[] initialEntryStatus = null;
-
-        // stacks used to store nodeId and entry index of each Node&lt;T&gt;
-        // from the root down to the leaf. Enables fast lookup
-        // of nodes when a split is propagated up the tree.
-        //private TIntStack parents = new TIntStack();
-        private Stack<int> parents = new Stack<int>();
-        //private TIntStack parentsEntry = new TIntStack();
-        private Stack<int> parentsEntry = new Stack<int>();
-
-        // initialisation
-        private int treeHeight = 1; // leaves are always level 1
-        private int rootNodeId = 0;
-        private int msize = 0;
-
-        // Enables creation of new nodes
-        //private int highestUsedNodeId = rootNodeId; 
-        private int highestUsedNodeId = 0;
-
-        // Deleted Node&lt;T&gt; objects are retained in the nodeMap, 
-        // so that they can be reused. Store the IDs of nodes
-        // which can be reused.
-        //private TIntStack deletedNodeIds = new TIntStack();
-        private Stack<int> deletedNodeIds = new Stack<int>();
-
-        // List of nearest rectangles. Use a member variable to
-        // avoid recreating the object each time nearest() is called.
-        //private TIntArrayList nearestIds = new TIntArrayList();
-        List<int> nearestIds = new List<int>();
-
-        //Added dictionaries to support generic objects..
-        //possibility to change the code to support objects without dictionaries.
-        private Dictionary<int, T> IdsToItems = new Dictionary<int,T>();
-        private Dictionary<T,int> ItemsToIds = new Dictionary<T,int>();
-        private volatile int idcounter = int.MinValue;
-
-        //the recursion methods require a delegate to retrieve data
-        private delegate void intproc(int x);
-
-        /// <summary>
-        /// Initialize implementation dependent properties of the RTree.
-        /// </summary>
-        public RTree()
-        {
-            init();
-        }
-
-        /// <summary>
-        /// Initialize implementation dependent properties of the RTree.
-        /// </summary>
-        /// <param name="MaxNodeEntries">his specifies the maximum number of entries
-        ///in a node. The default value is 10, which is used if the property is
-        ///not specified, or is less than 2.</param>
-        /// <param name="MinNodeEntries">This specifies the minimum number of entries
-        ///in a node. The default value is half of the MaxNodeEntries value (rounded
-        ///down), which is used if the property is not specified or is less than 1.
-        ///</param>
         public RTree(int MaxNodeEntries, int MinNodeEntries)
         {
-            minNodeEntries = MinNodeEntries;
-            maxNodeEntries = MaxNodeEntries;
-            init();
+            maxNodeEntries = MaxNodeEntries < 2 ? DefaultCapacity : MaxNodeEntries;
+            minNodeEntries = MinNodeEntries < 1 || MinNodeEntries > maxNodeEntries / 2
+                ? maxNodeEntries / 2 : MinNodeEntries;
+            int initial = Math.Min(16, int.MaxValue / maxNodeEntries);
+            if (initial < 1 || maxNodeEntries == int.MaxValue)
+                throw new ArgumentOutOfRangeException("MaxNodeEntries");
+            nodes = new TreeNode[initial];
+            entries = new TreeEntry[checked(initial * maxNodeEntries)];
+            itemValues = new T[16];
+            itemLive = new bool[16];
+            splitEntries = new TreeEntry[checked(maxNodeEntries + 1)];
+            splitOrder = new int[splitEntries.Length];
+            bestOrder = new int[splitEntries.Length];
+            prefixBounds = new Aabb[splitEntries.Length];
+            suffixBounds = new Aabb[splitEntries.Length];
+            splitComparer = new SplitComparer(splitEntries);
+            rootNodeId = AllocateNode(1);
         }
 
-        private void init()
-        {
-            //initialize logs
-          //  log = LogManager.GetLogger(typeof(RTree<T>).FullName);
-           // deleteLog = LogManager.GetLogger(typeof(RTree<T>).FullName + "-delete");
-
-            // Obviously a Node&lt;T&gt; with less than 2 entries cannot be split.
-            // The Node&lt;T&gt; splitting algorithm will work with only 2 entries
-            // per node, but will be inefficient.
-            if (maxNodeEntries < 2)
-            {
-                maxNodeEntries = DEFAULT_MAX_NODE_ENTRIES;
-            }
-
-            // The MinNodeEntries must be less than or equal to (int) (MaxNodeEntries / 2)
-            if (minNodeEntries < 1 || minNodeEntries > maxNodeEntries / 2)
-            {
-                minNodeEntries = maxNodeEntries / 2;
-            }
-
-            entryStatus = new byte[maxNodeEntries];
-            initialEntryStatus = new byte[maxNodeEntries];
-
-            for (int i = 0; i < maxNodeEntries; i++)
-            {
-                initialEntryStatus[i] = ENTRY_STATUS_UNASSIGNED;
-            }
-
-            Node<T> root = new Node<T>(rootNodeId, 1, maxNodeEntries);
-            nodeMap.Add(rootNodeId, root);
-
-        }
-
-        /// <summary>
-        /// Adds an item to the spatial index
-        /// </summary>
-        /// <param name="r"></param>
-        /// <param name="item"></param>
+        /// <summary>Adds a unique non-null item and copies its geometric bounds.</summary>
         public void Add(Rectangle r, T item)
         {
-            idcounter++;
-            int id = idcounter;
-
-            IdsToItems.Add(id, item);
-            ItemsToIds.Add(item, id);
-
-            add(r, id);
+            if (r == null) throw new ArgumentNullException("r");
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
+            Aabb bounds = Aabb.FromRectangle(r);
+            AddValue(bounds, item);
         }
 
-        private void add(Rectangle r, int id)
+        internal void AddValue(Aabb bounds, T item)
         {
-            
-            add(r.copy(), id, 1);
-
-            msize++;
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
+            sync.EnterWriteLock();
+            try
+            {
+                if (itemIds.ContainsKey(item)) throw new ArgumentException("The item is already indexed.", "item");
+                if (msize == int.MaxValue) throw new InvalidOperationException("The index is full.");
+                int id = AllocateItem();
+                try { itemIds.Add(item, id); }
+                catch { ReleaseItem(id); throw; }
+                itemValues[id] = item;
+                itemLive[id] = true;
+                try { InsertRoot(new TreeEntry(bounds, id), 1); }
+                catch
+                {
+                    itemIds.Remove(item);
+                    ReleaseItem(id);
+                    throw;
+                }
+                msize++;
+            }
+            finally { sync.ExitWriteLock(); }
         }
 
-        /// <summary>
-        /// Adds a new entry at a specified level in the tree
-        /// </summary>
-        /// <param name="r"></param>
-        /// <param name="id"></param>
-        /// <param name="level"></param>
-        private void add(Rectangle r, int id, int level)
-        {
-            // I1 [Find position for new record] Invoke ChooseLeaf to select a 
-            // leaf Node&lt;T&gt; L in which to place r
-            Node<T> n = chooseNode(r, level);
-            Node<T> newLeaf = null;
-
-            // I2 [Add record to leaf node] If L has room for another entry, 
-            // install E. Otherwise invoke SplitNode to obtain L and LL containing
-            // E and all the old entries of L
-            if (n.entryCount < maxNodeEntries)
-            {
-                n.addEntryNoCopy(r, id);
-            }
-            else
-            {
-                newLeaf = splitNode(n, r, id);
-            }
-
-            // I3 [Propagate changes upwards] Invoke AdjustTree on L, also passing LL
-            // if a split was performed
-            Node<T> newNode = adjustTree(n, newLeaf);
-
-            // I4 [Grow tree taller] If Node&lt;T&gt; split propagation caused the root to 
-            // split, create a new root whose children are the two resulting nodes.
-            if (newNode != null)
-            {
-                int oldRootNodeId = rootNodeId;
-                Node<T> oldRoot = getNode(oldRootNodeId);
-
-                rootNodeId = getNextNodeId();
-                treeHeight++;
-                Node<T> root = new Node<T>(rootNodeId, treeHeight, maxNodeEntries);
-                root.addEntry(newNode.mbr, newNode.nodeId);
-                root.addEntry(oldRoot.mbr, oldRoot.nodeId);
-                nodeMap.Add(rootNodeId, root);
-            }
-        }
-
-        /// <summary>
-        /// Deletes an item from the spatial index
-        /// </summary>
-        /// <param name="r"></param>
-        /// <param name="item"></param>
-        /// <returns></returns>
+        /// <summary>Deletes a matching item and exact box, or returns false.</summary>
         public bool Delete(Rectangle r, T item)
         {
-            int id = ItemsToIds[item];
-
-            bool success = delete(r, id);
-            if (success == true)
-            {
-                IdsToItems.Remove(id);
-                ItemsToIds.Remove(item);
-            }
-            return success;
+            if (r == null) throw new ArgumentNullException("r");
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
+            Aabb bounds = Aabb.FromRectangle(r);
+            return DeleteValue(bounds, item);
         }
 
-        private bool delete(Rectangle r, int id)
+        internal bool DeleteValue(Aabb bounds, T item)
         {
-            // FindLeaf algorithm inlined here. Note the "official" algorithm 
-            // searches all overlapping entries. This seems inefficient to me, 
-            // as an entry is only worth searching if it contains (NOT overlaps)
-            // the rectangle we are searching for.
-            //
-            // Also the algorithm has been changed so that it is not recursive.
-
-            // FL1 [Search subtrees] If root is not a leaf, check each entry 
-            // to determine if it contains r. For each entry found, invoke
-            // findLeaf on the Node&lt;T&gt; pointed to by the entry, until r is found or
-            // all entries have been checked.
-            parents.Clear();
-            parents.Push(rootNodeId);
-
-            parentsEntry.Clear();
-            parentsEntry.Push(-1);
-            Node<T> n = null;
-            int foundIndex = -1;  // index of entry to be deleted in leaf
-
-            while (foundIndex == -1 && parents.Count > 0)
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
+            sync.EnterWriteLock();
+            try
             {
-                n = getNode(parents.Peek());
-                int startIndex = parentsEntry.Peek() + 1;
+                int itemId;
+                if (!itemIds.TryGetValue(item, out itemId)) return false;
+                var path = deletePath;
+                var pathEntries = deletePathEntries;
+                path.Clear(); pathEntries.Clear(); deleteOrphans.Clear();
+                int leaf, index;
+                if (!FindLeaf(rootNodeId, bounds, itemId, path, pathEntries, out leaf, out index)) return false;
 
-                if (!n.isLeaf())
+                // Invoke user equality before any structural changes.
+                itemIds.Remove(item);
+                RemoveEntry(leaf, index);
+                var orphanEntries = deleteOrphans;
+                for (int depth = path.Count - 1; depth >= 0; depth--)
                 {
-                    bool contains = false;
-                    for (int i = startIndex; i < n.entryCount; i++)
+                    int parent = path[depth], parentEntry = pathEntries[depth];
+                    if (nodes[leaf].Count < minNodeEntries)
                     {
-                        if (n.entries[i].contains(r))
-                        {
-                            parents.Push(n.ids[i]);
-                            parentsEntry.Pop();
-                            parentsEntry.Push(i); // this becomes the start index when the child has been searched
-                            parentsEntry.Push(-1);
-                            contains = true;
-                            break; // ie go to next iteration of while()
-                        }
+                        int offset = leaf * maxNodeEntries;
+                        for (int i = 0; i < nodes[leaf].Count; i++)
+                            orphanEntries.Add(new OrphanEntry(entries[offset + i], nodes[leaf].Level));
+                        RemoveEntry(parent, parentEntry);
+                        ReleaseNode(leaf);
                     }
-                    if (contains)
+                    else
                     {
-                        continue;
+                        int slot = parent * maxNodeEntries + parentEntry;
+                        entries[slot].Bounds = nodes[leaf].Bounds;
+                        Recalculate(parent);
                     }
-                }
-                else
-                {
-                    foundIndex = n.findEntry(r, id);
+                    leaf = parent;
                 }
 
-                parents.Pop();
-                parentsEntry.Pop();
-            } // while not found
-
-            if (foundIndex != -1)
-            {
-                n.deleteEntry(foundIndex, minNodeEntries);
-                condenseTree(n);
+                // Upper-level orphan entries must be restored before lower-level
+                // ones, so all dependent leaves retain the same depth.
+                orphanEntries.Sort(OrphanComparer.Instance);
+                for (int i = 0; i < orphanEntries.Count; i++)
+                    InsertRoot(orphanEntries[i].Entry, orphanEntries[i].Level);
+                CollapseRoot();
+                ReleaseItem(itemId);
                 msize--;
+                return true;
             }
-
-            // shrink the tree if possible (i.e. if root Node&lt;T%gt; has exactly one entry,and that 
-            // entry is not a leaf node, delete the root (it's entry becomes the new root)
-            Node<T> root = getNode(rootNodeId);
-            while (root.entryCount == 1 && treeHeight > 1)
+            finally
             {
-                root.entryCount = 0;
-                rootNodeId = root.ids[0];
-                treeHeight--;
-                root = getNode(rootNodeId);
+                deletePath.Clear(); deletePathEntries.Clear(); deleteOrphans.Clear();
+                sync.ExitWriteLock();
             }
-
-            return (foundIndex != -1);
-        }
-
-        /// <summary>
-        /// Retrieve nearest items to a point in radius furthestDistance
-        /// </summary>
-        /// <param name="p">Point of origin</param>
-        /// <param name="furthestDistance">maximum distance</param>
-        /// <returns>List of items</returns>
-        public List<T> Nearest(Point p, double furthestDistance)
-        {
-            List<T> retval = new List<T>();
-            nearest(p, delegate(int id)
-            {
-                retval.Add(IdsToItems[id]);
-            }, furthestDistance);
-            return retval;
-        }
-
-
-        private void nearest(Point p, intproc v, double furthestDistance)
-        {
-            Node<T> rootNode = getNode(rootNodeId);
-
-            nearest(p, rootNode, furthestDistance);
-
-            foreach (int id in nearestIds)
-                v(id);
-            nearestIds.Clear();
-        }
-
-        /// <summary>
-        /// Retrieve items which intersect with Rectangle r
-        /// </summary>
-        /// <param name="r"></param>
-        /// <returns></returns>
-        public List<T> Intersects(Rectangle r)
-        {
-            List<T> retval = new List<T>();
-            intersects(r, delegate(int id)
-            {
-                retval.Add(IdsToItems[id]);
-            });
-            return retval;
-        }
-
-
-        private void intersects(Rectangle r, intproc v)
-        {
-            Node<T> rootNode = getNode(rootNodeId);
-            intersects(r, v, rootNode);
-        }
-
-        /// <summary>
-        /// find all rectangles in the tree that are contained by the passed rectangle
-        /// written to be non-recursive (should model other searches on this?)</summary>
-        /// <param name="r"></param>
-        /// <returns></returns>
-        public List<T> Contains(Rectangle r)
-        {
-            List<T> retval = new List<T>();
-            contains(r, delegate(int id)
-            {
-                retval.Add(IdsToItems[id]);
-            });
-
-            return retval;
-        }
-
-        private void contains(Rectangle r, intproc v)
-        {
-            // find all rectangles in the tree that are contained by the passed rectangle
-            // written to be non-recursive (should model other searches on this?)
-
-            parents.Clear();
-            parents.Push(rootNodeId);
-
-            parentsEntry.Clear();
-            parentsEntry.Push(-1);
-
-            // TODO: possible shortcut here - could test for intersection with the 
-            // MBR of the root node. If no intersection, return immediately.
-
-            while (parents.Count > 0)
-            {
-                Node<T> n = getNode(parents.Peek());
-                int startIndex = parentsEntry.Peek() + 1;
-
-                if (!n.isLeaf())
-                {
-                    // go through every entry in the index Node<T> to check
-                    // if it intersects the passed rectangle. If so, it 
-                    // could contain entries that are contained.
-                    bool intersects = false;
-                    for (int i = startIndex; i < n.entryCount; i++)
-                    {
-                        if (r.intersects(n.entries[i]))
-                        {
-                            parents.Push(n.ids[i]);
-                            parentsEntry.Pop();
-                            parentsEntry.Push(i); // this becomes the start index when the child has been searched
-                            parentsEntry.Push(-1);
-                            intersects = true;
-                            break; // ie go to next iteration of while()
-                        }
-                    }
-                    if (intersects)
-                    {
-                        continue;
-                    }
-                }
-                else
-                {
-                    // go through every entry in the leaf to check if 
-                    // it is contained by the passed rectangle
-                    for (int i = 0; i < n.entryCount; i++)
-                    {
-                        if (r.contains(n.entries[i]))
-                        {
-                            v(n.ids[i]);
-                        }
-                    }
-                }
-                parents.Pop();
-                parentsEntry.Pop();
-            }
-        }
-
-        /**
-        * @see com.infomatiq.jsi.SpatialIndex#getBounds()
-        */
-        public Rectangle getBounds()
-        {
-            Rectangle bounds = null;
-
-            Node<T> n = getNode(getRootNodeId());
-            if (n != null && n.getMBR() != null)
-            {
-                bounds = n.getMBR().copy();
-            }
-            return bounds;
-        }
-
-        /**
-         * @see com.infomatiq.jsi.SpatialIndex#getVersion()
-         */
-        public string getVersion()
-        {
-            return "RTree-" + version;
-        }
-        //-------------------------------------------------------------------------
-        // end of SpatialIndex methods
-        //-------------------------------------------------------------------------
-
-        /**
-         * Get the next available Node&lt;T&gt; ID. Reuse deleted Node&lt;T&gt; IDs if
-         * possible
-         */
-        private int getNextNodeId()
-        {
-            int nextNodeId = 0;
-            if (deletedNodeIds.Count > 0)
-            {
-                nextNodeId = deletedNodeIds.Pop();
-            }
-            else
-            {
-                nextNodeId = 1 + highestUsedNodeId++;
-            }
-            return nextNodeId;
-        }
-
-       
-       
-       
-
-        /// <summary>
-        /// Get a Node&lt;T&gt; object, given the ID of the node.
-        /// </summary>
-        /// <param name="index"></param>
-        /// <returns></returns>
-        private Node<T> getNode(int index)
-        {
-            return (Node<T>)nodeMap[index];
-        }
-
-        /// <summary>
-        /// Get the highest used Node&lt;T&gt; ID
-        /// </summary>
-        /// <returns></returns>
-        private int getHighestUsedNodeId()
-        {
-            return highestUsedNodeId;
-        }
-
-        /// <summary>
-        /// Get the root Node&lt;T&gt; ID
-        /// </summary>
-        /// <returns></returns>
-        public int getRootNodeId()
-        {
-            return rootNodeId;
-        }
-
-        /// <summary>
-        /// Split a node. Algorithm is taken pretty much verbatim from
-        /// Guttman's original paper.
-        /// </summary>
-        /// <param name="n"></param>
-        /// <param name="newRect"></param>
-        /// <param name="newId"></param>
-        /// <returns>return new Node&lt;T&gt; object.</returns>
-        private Node<T> splitNode(Node<T> n, Rectangle newRect, int newId)
-        {
-            // [Pick first entry for each group] Apply algorithm pickSeeds to 
-            // choose two entries to be the first elements of the groups. Assign
-            // each to a group.
-
-            // debug code
-            double initialArea = 0;
-            
-            System.Array.Copy(initialEntryStatus, 0, entryStatus, 0, maxNodeEntries);
-
-            Node<T> newNode = null;
-            newNode = new Node<T>(getNextNodeId(), n.level, maxNodeEntries);
-            nodeMap.Add(newNode.nodeId, newNode);
-
-            pickSeeds(n, newRect, newId, newNode); // this also sets the entryCount to 1
-
-            // [Check if done] If all entries have been assigned, stop. If one
-            // group has so few entries that all the rest must be assigned to it in 
-            // order for it to have the minimum number m, assign them and stop. 
-            while (n.entryCount + newNode.entryCount < maxNodeEntries + 1)
-            {
-                if (maxNodeEntries + 1 - newNode.entryCount == minNodeEntries)
-                {
-                    // assign all remaining entries to original node
-                    for (int i = 0; i < maxNodeEntries; i++)
-                    {
-                        if (entryStatus[i] == ENTRY_STATUS_UNASSIGNED)
-                        {
-                            entryStatus[i] = ENTRY_STATUS_ASSIGNED;
-                            n.mbr.add(n.entries[i]);
-                            n.entryCount++;
-                        }
-                    }
-                    break;
-                }
-                if (maxNodeEntries + 1 - n.entryCount == minNodeEntries)
-                {
-                    // assign all remaining entries to new node
-                    for (int i = 0; i < maxNodeEntries; i++)
-                    {
-                        if (entryStatus[i] == ENTRY_STATUS_UNASSIGNED)
-                        {
-                            entryStatus[i] = ENTRY_STATUS_ASSIGNED;
-                            newNode.addEntryNoCopy(n.entries[i], n.ids[i]);
-                            n.entries[i] = null;
-                        }
-                    }
-                    break;
-                }
-
-                // [Select entry to assign] Invoke algorithm pickNext to choose the
-                // next entry to assign. Add it to the group whose covering rectangle 
-                // will have to be enlarged least to accommodate it. Resolve ties
-                // by adding the entry to the group with smaller area, then to the 
-                // the one with fewer entries, then to either. Repeat from S2
-                pickNext(n, newNode);
-            }
-
-            n.reorganize(this);
-            return newNode;
-        }
-
-        /// <summary>
-        /// Pick the seeds used to split a node.
-        /// Select two entries to be the first elements of the groups
-        /// </summary>
-        /// <param name="n"></param>
-        /// <param name="newRect"></param>
-        /// <param name="newId"></param>
-        /// <param name="newNode"></param>
-        private void pickSeeds(Node<T> n, Rectangle newRect, int newId, Node<T> newNode)
-        {
-            // Find extreme rectangles along all dimension. Along each dimension,
-            // find the entry whose rectangle has the highest low side, and the one 
-            // with the lowest high side. Record the separation.
-            double maxNormalizedSeparation = 0;
-            int highestLowIndex = 0;
-            int lowestHighIndex = 0;
-
-            // for the purposes of picking seeds, take the MBR of the Node&lt;T&gt; to include
-            // the new rectangle aswell.
-            n.mbr.add(newRect);
-
-            for (int d = 0; d < Rectangle.DIMENSIONS; d++)
-            {
-                double tempHighestLow = newRect.min[d];
-                int tempHighestLowIndex = -1; // -1 indicates the new rectangle is the seed
-
-                double tempLowestHigh = newRect.max[d];
-                int tempLowestHighIndex = -1;
-
-                for (int i = 0; i < n.entryCount; i++)
-                {
-                    double tempLow = n.entries[i].min[d];
-                    if (tempLow >= tempHighestLow)
-                    {
-                        tempHighestLow = tempLow;
-                        tempHighestLowIndex = i;
-                    }
-                    else
-                    {  // ensure that the same index cannot be both lowestHigh and highestLow
-                        double tempHigh = n.entries[i].max[d];
-                        if (tempHigh <= tempLowestHigh)
-                        {
-                            tempLowestHigh = tempHigh;
-                            tempLowestHighIndex = i;
-                        }
-                    }
-
-                    // PS2 [Adjust for shape of the rectangle cluster] Normalize the separations
-                    // by dividing by the widths of the entire set along the corresponding
-                    // dimension
-                    double normalizedSeparation = (tempHighestLow - tempLowestHigh) / (n.mbr.max[d] - n.mbr.min[d]);
-
-                    // PS3 [Select the most extreme pair] Choose the pair with the greatest
-                    // normalized separation along any dimension.
-                    if (normalizedSeparation > maxNormalizedSeparation)
-                    {
-                        maxNormalizedSeparation = normalizedSeparation;
-                        highestLowIndex = tempHighestLowIndex;
-                        lowestHighIndex = tempLowestHighIndex;
-                    }
-                }
-            }
-
-            // highestLowIndex is the seed for the new node.
-            if (highestLowIndex == -1)
-            {
-                newNode.addEntry(newRect, newId);
-            }
-            else
-            {
-                newNode.addEntryNoCopy(n.entries[highestLowIndex], n.ids[highestLowIndex]);
-                n.entries[highestLowIndex] = null;
-
-                // move the new rectangle into the space vacated by the seed for the new node
-                n.entries[highestLowIndex] = newRect;
-                n.ids[highestLowIndex] = newId;
-            }
-
-            // lowestHighIndex is the seed for the original node. 
-            if (lowestHighIndex == -1)
-            {
-                lowestHighIndex = highestLowIndex;
-            }
-
-            entryStatus[lowestHighIndex] = ENTRY_STATUS_ASSIGNED;
-            n.entryCount = 1;
-            n.mbr.set(n.entries[lowestHighIndex].min, n.entries[lowestHighIndex].max);
-        }
-
-
-
-        
-        /// <summary>
-        /// Pick the next entry to be assigned to a group during a Node&lt;T&gt; split.
-        /// [Determine cost of putting each entry in each group] For each 
-        /// entry not yet in a group, calculate the area increase required
-        /// in the covering rectangles of each group  
-        /// </summary>
-        /// <param name="n"></param>
-        /// <param name="newNode"></param>
-        /// <returns></returns>
-        private int pickNext(Node<T> n, Node<T> newNode)
-        {
-            double maxDifference = double.NegativeInfinity;
-            int next = 0;
-            int nextGroup = 0;
-
-            maxDifference = double.NegativeInfinity;
-
-            for (int i = 0; i < maxNodeEntries; i++)
-            {
-                if (entryStatus[i] == ENTRY_STATUS_UNASSIGNED)
-                {
-
-                    double nIncrease = n.mbr.enlargement(n.entries[i]);
-                    double newNodeIncrease = newNode.mbr.enlargement(n.entries[i]);
-                    double difference = Math.Abs(nIncrease - newNodeIncrease);
-
-                    if (difference > maxDifference)
-                    {
-                        next = i;
-
-                        if (nIncrease < newNodeIncrease)
-                        {
-                            nextGroup = 0;
-                        }
-                        else if (newNodeIncrease < nIncrease)
-                        {
-                            nextGroup = 1;
-                        }
-                        else if (n.mbr.area() < newNode.mbr.area())
-                        {
-                            nextGroup = 0;
-                        }
-                        else if (newNode.mbr.area() < n.mbr.area())
-                        {
-                            nextGroup = 1;
-                        }
-                        else if (newNode.entryCount < maxNodeEntries / 2)
-                        {
-                            nextGroup = 0;
-                        }
-                        else
-                        {
-                            nextGroup = 1;
-                        }
-                        maxDifference = difference;
-                    }
-                }
-            }
-
-            entryStatus[next] = ENTRY_STATUS_ASSIGNED;
-
-            if (nextGroup == 0)
-            {
-                n.mbr.add(n.entries[next]);
-                n.entryCount++;
-            }
-            else
-            {
-                // move to new node.
-                newNode.addEntryNoCopy(n.entries[next], n.ids[next]);
-                n.entries[next] = null;
-            }
-
-            return next;
-        }
-
-        
-        /// <summary>
-        /// Recursively searches the tree for the nearest entry. Other queries
-        /// call execute() on an IntProcedure when a matching entry is found; 
-        /// however nearest() must store the entry Ids as it searches the tree,
-        /// in case a nearer entry is found.
-        /// Uses the member variable nearestIds to store the nearest
-        /// entry IDs.
-        /// </summary>
-        /// <remarks>TODO rewrite this to be non-recursive?</remarks>
-        /// <param name="p"></param>
-        /// <param name="n"></param>
-        /// <param name="nearestDistance"></param>
-        /// <returns></returns>
-        private double nearest(Point p, Node<T> n, double nearestDistance)
-        {
-            for (int i = 0; i < n.entryCount; i++)
-            {
-                double tempDistance = n.entries[i].distance(p);
-                if (n.isLeaf())
-                { // for leaves, the distance is an actual nearest distance 
-                    if (tempDistance < nearestDistance)
-                    {
-                        nearestDistance = tempDistance;
-                        nearestIds.Clear();
-                    }
-                    if (tempDistance <= nearestDistance)
-                    {
-                        nearestIds.Add(n.ids[i]);
-                    }
-                }
-                else
-                { // for index nodes, only go into them if they potentially could have
-                    // a rectangle nearer than actualNearest
-                    if (tempDistance <= nearestDistance)
-                    {
-                        // search the child node
-                        nearestDistance = nearest(p, getNode(n.ids[i]), nearestDistance);
-                    }
-                }
-            }
-            return nearestDistance;
-        }
-
-    
-        /// <summary>
-        /// Recursively searches the tree for all intersecting entries.
-        /// Immediately calls execute() on the passed IntProcedure when 
-        /// a matching entry is found.
-        /// [x] TODO rewrite this to be non-recursive? Make sure it
-        /// doesn't slow it down.
-        /// </summary>
-        /// <param name="r"></param>
-        /// <param name="v"></param>
-        /// <param name="n"></param>
-        private void intersects(Rectangle r, intproc v, Node<T> n)
-        {
-            for (int i = 0; i < n.entryCount; i++)
-            {
-                if (r.intersects(n.entries[i]))
-                {
-                    if (n.isLeaf())
-                    {
-                        v(n.ids[i]);
-                    }
-                    else
-                    {
-                        Node<T> childNode = getNode(n.ids[i]);
-                        intersects(r, v, childNode);
-                    }
-                }
-            }
-        }
-
-        /**
-         * Used by delete(). Ensures that all nodes from the passed node
-         * up to the root have the minimum number of entries.
-         * 
-         * Note that the parent and parentEntry stacks are expected to
-         * contain the nodeIds of all parents up to the root.
-         */
-
-        private Rectangle oldRectangle = new Rectangle(0, 0, 0, 0,0,0);
-        private void condenseTree(Node<T> l)
-        {
-            // CT1 [Initialize] Set n=l. Set the list of eliminated
-            // nodes to be empty.
-            Node<T> n = l;
-            Node<T> parent = null;
-            int parentEntry = 0;
-
-            //TIntStack eliminatedNodeIds = new TIntStack();
-            Stack<int> eliminatedNodeIds = new Stack<int>();
-
-            // CT2 [Find parent entry] If N is the root, go to CT6. Otherwise 
-            // let P be the parent of N, and let En be N's entry in P  
-            while (n.level != treeHeight)
-            {
-                parent = getNode(parents.Pop());
-                parentEntry = parentsEntry.Pop();
-
-                // CT3 [Eliminiate under-full node] If N has too few entries,
-                // delete En from P and add N to the list of eliminated nodes
-                if (n.entryCount < minNodeEntries)
-                {
-                    parent.deleteEntry(parentEntry, minNodeEntries);
-                    eliminatedNodeIds.Push(n.nodeId);
-                }
-                else
-                {
-                    // CT4 [Adjust covering rectangle] If N has not been eliminated,
-                    // adjust EnI to tightly contain all entries in N
-                    if (!n.mbr.Equals(parent.entries[parentEntry]))
-                    {
-                        oldRectangle.set(parent.entries[parentEntry].min, parent.entries[parentEntry].max);
-                        parent.entries[parentEntry].set(n.mbr.min, n.mbr.max);
-                        parent.recalculateMBR(oldRectangle);
-                    }
-                }
-                // CT5 [Move up one level in tree] Set N=P and repeat from CT2
-                n = parent;
-            }
-
-            // CT6 [Reinsert orphaned entries] Reinsert all entries of nodes in set Q.
-            // Entries from eliminated leaf nodes are reinserted in tree leaves as in 
-            // Insert(), but entries from higher level nodes must be placed higher in 
-            // the tree, so that leaves of their dependent subtrees will be on the same
-            // level as leaves of the main tree
-            while (eliminatedNodeIds.Count > 0)
-            {
-                Node<T> e = getNode(eliminatedNodeIds.Pop());
-                for (int j = 0; j < e.entryCount; j++)
-                {
-                    add(e.entries[j], e.ids[j], e.level);
-                    e.entries[j] = null;
-                }
-                e.entryCount = 0;
-                deletedNodeIds.Push(e.nodeId);
-            }
-        }
-
-        /**
-         *  Used by add(). Chooses a leaf to add the rectangle to.
-         */
-        private Node<T> chooseNode(Rectangle r, int level)
-        {
-            // CL1 [Initialize] Set N to be the root node
-            Node<T> n = getNode(rootNodeId);
-            parents.Clear();
-            parentsEntry.Clear();
-
-            // CL2 [Leaf check] If N is a leaf, return N
-            while (true)
-            {
-                if (n.level == level)
-                {
-                    return n;
-                }
-
-                // CL3 [Choose subtree] If N is not at the desired level, let F be the entry in N 
-                // whose rectangle FI needs least enlargement to include EI. Resolve
-                // ties by choosing the entry with the rectangle of smaller area.
-                double leastEnlargement = n.getEntry(0).enlargement(r);
-                int index = 0; // index of rectangle in subtree
-                for (int i = 1; i < n.entryCount; i++)
-                {
-                    Rectangle tempRectangle = n.getEntry(i);
-                    double tempEnlargement = tempRectangle.enlargement(r);
-                    if ((tempEnlargement < leastEnlargement) ||
-                        ((tempEnlargement == leastEnlargement) &&
-                         (tempRectangle.area() < n.getEntry(index).area())))
-                    {
-                        index = i;
-                        leastEnlargement = tempEnlargement;
-                    }
-                }
-
-                parents.Push(n.nodeId);
-                parentsEntry.Push(index);
-
-                // CL4 [Descend until a leaf is reached] Set N to be the child Node&lt;T&gt; 
-                // pointed to by Fp and repeat from CL2
-                n = getNode(n.ids[index]);
-            }
-        }
-
-        /**
-         * Ascend from a leaf Node&lt;T&gt; L to the root, adjusting covering rectangles and
-         * propagating Node&lt;T&gt; splits as necessary.
-         */
-        private Node<T> adjustTree(Node<T> n, Node<T> nn)
-        {
-            // AT1 [Initialize] Set N=L. If L was split previously, set NN to be 
-            // the resulting second node.
-
-            // AT2 [Check if done] If N is the root, stop
-            while (n.level != treeHeight)
-            {
-
-                // AT3 [Adjust covering rectangle in parent entry] Let P be the parent 
-                // Node<T> of N, and let En be N's entry in P. Adjust EnI so that it tightly
-                // encloses all entry rectangles in N.
-                Node<T> parent = getNode(parents.Pop());
-                int entry = parentsEntry.Pop();
-
-                if (!parent.entries[entry].Equals(n.mbr))
-                {
-                    parent.entries[entry].set(n.mbr.min, n.mbr.max);
-                    parent.mbr.set(parent.entries[0].min, parent.entries[0].max);
-                    for (int i = 1; i < parent.entryCount; i++)
-                    {
-                        parent.mbr.add(parent.entries[i]);
-                    }
-                }
-
-                // AT4 [Propagate Node<T> split upward] If N has a partner NN resulting from 
-                // an earlier split, create a new entry Enn with Ennp pointing to NN and 
-                // Enni enclosing all rectangles in NN. Add Enn to P if there is room. 
-                // Otherwise, invoke splitNode to produce P and PP containing Enn and
-                // all P's old entries.
-                Node<T> newNode = null;
-                if (nn != null)
-                {
-                    if (parent.entryCount < maxNodeEntries)
-                    {
-                        parent.addEntry(nn.mbr, nn.nodeId);
-                    }
-                    else
-                    {
-                        newNode = splitNode(parent, nn.mbr.copy(), nn.nodeId);
-                    }
-                }
-
-                // AT5 [Move up to next level] Set N = P and set NN = PP if a split 
-                // occurred. Repeat from AT2
-                n = parent;
-                nn = newNode;
-
-                parent = null;
-                newNode = null;
-            }
-
-            return nn;
-        }
-
-        /**
-         * Check the consistency of the tree.
-         */
-        private void checkConsistency(int nodeId, int expectedLevel, Rectangle expectedMBR)
-        {
-            // go through the tree, and check that the internal data structures of 
-            // the tree are not corrupted.    
-            Node<T> n = getNode(nodeId);
-
-            Rectangle calculatedMBR = calculateMBR(n);
-
-            for (int i = 0; i < n.entryCount; i++)
-            {
-
-                if (n.level > 1)
-                { // if not a leaf
-                    checkConsistency(n.ids[i], n.level - 1, n.entries[i]);
-                }
-            }
-        }
-
-        /**
-         * Given a Node<T> object, calculate the Node<T> MBR from it's entries.
-         * Used in consistency checking
-         */
-        private Rectangle calculateMBR(Node<T> n)
-        {
-            Rectangle mbr = new Rectangle(n.entries[0].min, n.entries[0].max);
-
-            for (int i = 1; i < n.entryCount; i++)
-            {
-                mbr.add(n.entries[i]);
-            }
-            return mbr;
         }
 
         public int Count
         {
-            get
+            get { sync.EnterReadLock(); try { return msize; } finally { sync.ExitReadLock(); } }
+        }
+
+        public Rectangle getBounds()
+        {
+            sync.EnterReadLock();
+            try { return nodes[rootNodeId].Count == 0 ? null : nodes[rootNodeId].Bounds.ToRectangle(); }
+            finally { sync.ExitReadLock(); }
+        }
+
+        public int getRootNodeId()
+        {
+            sync.EnterReadLock();
+            try { return rootNodeId; }
+            finally { sync.ExitReadLock(); }
+        }
+
+        public string getVersion() { return "RTree-" + version; }
+
+        /// <summary>Builds a packed, balanced tree using three-dimensional STR ordering.</summary>
+        public static RTree<T> BulkLoad(IEnumerable<KeyValuePair<Rectangle, T>> items)
+        {
+            return BulkLoad(items, DefaultCapacity, DefaultCapacity / 2);
+        }
+
+        public static RTree<T> BulkLoad(IEnumerable<KeyValuePair<Rectangle, T>> items, int maxNodeEntries, int minNodeEntries)
+        {
+            if (items == null) throw new ArgumentNullException("items");
+            var tree = new RTree<T>(maxNodeEntries, minNodeEntries);
+            tree.sync.EnterWriteLock();
+            try
             {
-                return this.msize;
+                var records = new List<TreeEntry>();
+                foreach (var pair in items)
+                {
+                    if (pair.Key == null) throw new ArgumentNullException("items", "An item has null bounds.");
+                    if (ReferenceEquals(pair.Value, null)) throw new ArgumentNullException("items", "An item is null.");
+                    Aabb box = Aabb.FromRectangle(pair.Key);
+                    int id = tree.AllocateItem();
+                    tree.itemIds.Add(pair.Value, id);
+                    tree.itemValues[id] = pair.Value;
+                    tree.itemLive[id] = true;
+                    records.Add(new TreeEntry(box, id));
+                }
+                tree.msize = records.Count;
+                tree.Pack(records.ToArray());
+                return tree;
+            }
+            finally { tree.sync.ExitWriteLock(); }
+        }
+
+        /// <summary>Repacks existing items with STR ordering without changing their identities.</summary>
+        public void Rebuild()
+        {
+            sync.EnterWriteLock();
+            try
+            {
+                var records = new TreeEntry[msize];
+                int position = 0;
+                for (int id = 0; id < nextNodeId; id++)
+                {
+                    if (!nodes[id].Live || nodes[id].Level != 1) continue;
+                    Array.Copy(entries, id * maxNodeEntries, records, position, nodes[id].Count);
+                    position += nodes[id].Count;
+                }
+                var packed = new RTree<T>(maxNodeEntries, minNodeEntries);
+                packed.Pack(records);
+                // Publish only after a complete build, while holding the write lock.
+                nodes = packed.nodes; entries = packed.entries;
+                rootNodeId = packed.rootNodeId; treeHeight = packed.treeHeight;
+                nextNodeId = packed.nextNodeId; freeNodeIds = packed.freeNodeIds;
+            }
+            finally { sync.ExitWriteLock(); }
+        }
+
+        private int AllocateItem()
+        {
+            if (freeItemIds.Count != 0) return freeItemIds.Pop();
+            if (nextItemId == itemValues.Length)
+            {
+                int capacity = Grow(itemValues.Length, checked(nextItemId + 1), int.MaxValue);
+                var values = new T[capacity]; var live = new bool[capacity];
+                Array.Copy(itemValues, values, itemValues.Length);
+                Array.Copy(itemLive, live, itemLive.Length);
+                itemValues = values; itemLive = live;
+            }
+            return nextItemId++;
+        }
+
+        private void ReleaseItem(int id)
+        {
+            itemValues[id] = default(T); itemLive[id] = false; freeItemIds.Push(id);
+        }
+
+        private int AllocateNode(int level)
+        {
+            int id;
+            if (freeNodeIds.Count != 0) id = freeNodeIds.Pop();
+            else
+            {
+                EnsureNodeCapacity(checked(nextNodeId + 1));
+                id = nextNodeId++;
+            }
+            nodes[id] = new TreeNode { Level = level, Live = true };
+            return id;
+        }
+
+        private void EnsureNodeCapacity(int required)
+        {
+            if (required <= nodes.Length) return;
+            int capacity = Grow(nodes.Length, required, int.MaxValue / maxNodeEntries);
+            var newNodes = new TreeNode[capacity];
+            var newEntries = new TreeEntry[checked(capacity * maxNodeEntries)];
+            Array.Copy(nodes, newNodes, nodes.Length);
+            Array.Copy(entries, newEntries, entries.Length);
+            nodes = newNodes; entries = newEntries;
+        }
+
+        private static int Grow(int current, int required, int limit)
+        {
+            if (required > limit) throw new InvalidOperationException("The index has reached its storage limit.");
+            long doubled = (long)current * 2;
+            return (int)Math.Min(limit, Math.Max(required, doubled));
+        }
+
+        private void ReleaseNode(int id)
+        {
+            Array.Clear(entries, id * maxNodeEntries, maxNodeEntries);
+            nodes[id] = default(TreeNode);
+            freeNodeIds.Push(id);
+        }
+
+        private void AddEntry(int nodeId, TreeEntry entry)
+        {
+            int count = nodes[nodeId].Count;
+            entries[nodeId * maxNodeEntries + count] = entry;
+            nodes[nodeId].Bounds = count == 0 ? entry.Bounds : Aabb.Union(nodes[nodeId].Bounds, entry.Bounds);
+            nodes[nodeId].Count = count + 1;
+        }
+
+        private void RemoveEntry(int nodeId, int index)
+        {
+            int last = --nodes[nodeId].Count;
+            int offset = nodeId * maxNodeEntries;
+            if (index != last) entries[offset + index] = entries[offset + last];
+            entries[offset + last] = default(TreeEntry);
+            Recalculate(nodeId);
+        }
+
+        private void Recalculate(int nodeId)
+        {
+            int count = nodes[nodeId].Count;
+            if (count == 0) { nodes[nodeId].Bounds = default(Aabb); return; }
+            int offset = nodeId * maxNodeEntries;
+            Aabb bounds = entries[offset].Bounds;
+            for (int i = 1; i < count; i++) bounds = Aabb.Union(bounds, entries[offset + i].Bounds);
+            nodes[nodeId].Bounds = bounds;
+        }
+
+        private void InsertRoot(TreeEntry entry, int level)
+        {
+            if (nodes[rootNodeId].Count == 0)
+            {
+                nodes[rootNodeId].Level = level;
+                treeHeight = level;
+            }
+            int sibling = Insert(rootNodeId, entry, level);
+            if (sibling < 0) return;
+            int oldRoot = rootNodeId;
+            rootNodeId = AllocateNode(++treeHeight);
+            AddEntry(rootNodeId, new TreeEntry(nodes[oldRoot].Bounds, oldRoot));
+            AddEntry(rootNodeId, new TreeEntry(nodes[sibling].Bounds, sibling));
+        }
+
+        private int Insert(int nodeId, TreeEntry entry, int level)
+        {
+            if (nodes[nodeId].Level > level)
+            {
+                int chosen = ChooseEntry(nodeId, entry.Bounds);
+                int child = entries[nodeId * maxNodeEntries + chosen].Id;
+                int sibling = Insert(child, entry, level);
+                entries[nodeId * maxNodeEntries + chosen].Bounds = nodes[child].Bounds;
+                Recalculate(nodeId);
+                if (sibling < 0) return -1;
+                entry = new TreeEntry(nodes[sibling].Bounds, sibling);
+            }
+            else if (nodes[nodeId].Level != level)
+                throw new InvalidOperationException("An orphan entry has an invalid level.");
+            if (nodes[nodeId].Count < maxNodeEntries) { AddEntry(nodeId, entry); return -1; }
+            return Split(nodeId, entry);
+        }
+
+        private int ChooseEntry(int nodeId, Aabb addition)
+        {
+            int offset = nodeId * maxNodeEntries, chosen = 0;
+            Aabb best = entries[offset].Bounds;
+            double bestGrowth = best.Growth(addition);
+            for (int i = 1; i < nodes[nodeId].Count; i++)
+            {
+                Aabb candidate = entries[offset + i].Bounds;
+                double growth = candidate.Growth(addition);
+                int comparison = growth.CompareTo(bestGrowth);
+                if (comparison == 0) comparison = CompareGrowthTies(candidate, best, addition);
+                if (comparison == 0)
+                    comparison = nodes[entries[offset + i].Id].Count.CompareTo(nodes[entries[offset + chosen].Id].Count);
+                if (comparison < 0) { chosen = i; best = candidate; bestGrowth = growth; }
+            }
+            return chosen;
+        }
+
+        private static int CompareGrowthTies(Aabb left, Aabb right, Aabb addition)
+        {
+            int comparison = left.SurfaceGrowth(addition).CompareTo(right.SurfaceGrowth(addition));
+            if (comparison != 0) return comparison;
+            comparison = left.MarginGrowth(addition).CompareTo(right.MarginGrowth(addition));
+            if (comparison != 0) return comparison;
+            comparison = left.Volume().CompareTo(right.Volume());
+            if (comparison != 0) return comparison;
+            comparison = left.Surface().CompareTo(right.Surface());
+            if (comparison != 0) return comparison;
+            return left.Margin().CompareTo(right.Margin());
+        }
+
+        private int Split(int nodeId, TreeEntry addition)
+        {
+            int total = maxNodeEntries + 1, offset = nodeId * maxNodeEntries;
+            Array.Copy(entries, offset, splitEntries, 0, maxNodeEntries);
+            splitEntries[maxNodeEntries] = addition;
+            int chosenAxis = 0;
+            double minimumMargin = double.PositiveInfinity;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                double sum = 0;
+                for (int order = 0; order < 2; order++)
+                {
+                    PrepareSplit(axis, order != 0, total);
+                    for (int count = minNodeEntries; count <= total - minNodeEntries; count++)
+                        sum += prefixBounds[count - 1].Margin() + suffixBounds[count].Margin();
+                }
+                if (sum < minimumMargin) { minimumMargin = sum; chosenAxis = axis; }
+            }
+
+            bool found = false;
+            int bestCount = minNodeEntries, bestBalance = int.MaxValue;
+            double bestOverlap = 0, bestOverlapSurface = 0, bestOverlapMargin = 0;
+            double bestVolume = 0, bestSurface = 0, bestMargin = 0;
+            for (int order = 0; order < 2; order++)
+            {
+                PrepareSplit(chosenAxis, order != 0, total);
+                for (int count = minNodeEntries; count <= total - minNodeEntries; count++)
+                {
+                    Aabb left = prefixBounds[count - 1], right = suffixBounds[count];
+                    double overlap = left.OverlapVolume(right), overlapSurface = left.OverlapSurface(right), overlapMargin = left.OverlapMargin(right);
+                    double volume = left.Volume() + right.Volume(), surface = left.Surface() + right.Surface(), margin = left.Margin() + right.Margin();
+                    int balance = Math.Abs(total - 2 * count), comparison = -1;
+                    if (found)
+                    {
+                        comparison = overlap.CompareTo(bestOverlap);
+                        if (comparison == 0) comparison = overlapSurface.CompareTo(bestOverlapSurface);
+                        if (comparison == 0) comparison = overlapMargin.CompareTo(bestOverlapMargin);
+                        if (comparison == 0) comparison = volume.CompareTo(bestVolume);
+                        if (comparison == 0) comparison = surface.CompareTo(bestSurface);
+                        if (comparison == 0) comparison = margin.CompareTo(bestMargin);
+                        if (comparison == 0) comparison = balance.CompareTo(bestBalance);
+                    }
+                    if (comparison < 0)
+                    {
+                        found = true; bestCount = count; bestBalance = balance;
+                        bestOverlap = overlap; bestOverlapSurface = overlapSurface; bestOverlapMargin = overlapMargin;
+                        bestVolume = volume; bestSurface = surface; bestMargin = margin;
+                        Array.Copy(splitOrder, bestOrder, total);
+                    }
+                }
+            }
+            int sibling = AllocateNode(nodes[nodeId].Level);
+            Array.Clear(entries, nodeId * maxNodeEntries, maxNodeEntries);
+            nodes[nodeId].Count = 0;
+            nodes[nodeId].Bounds = default(Aabb);
+            for (int i = 0; i < bestCount; i++) AddEntry(nodeId, splitEntries[bestOrder[i]]);
+            for (int i = bestCount; i < total; i++) AddEntry(sibling, splitEntries[bestOrder[i]]);
+            return sibling;
+        }
+
+        private void PrepareSplit(int axis, bool upper, int total)
+        {
+            for (int i = 0; i < total; i++) splitOrder[i] = i;
+            splitComparer.Axis = axis; splitComparer.Upper = upper;
+            Array.Sort(splitOrder, 0, total, splitComparer);
+            Aabb bounds = splitEntries[splitOrder[0]].Bounds;
+            prefixBounds[0] = bounds;
+            for (int i = 1; i < total; i++) { bounds = Aabb.Union(bounds, splitEntries[splitOrder[i]].Bounds); prefixBounds[i] = bounds; }
+            bounds = splitEntries[splitOrder[total - 1]].Bounds;
+            suffixBounds[total - 1] = bounds;
+            for (int i = total - 2; i >= 0; i--) { bounds = Aabb.Union(bounds, splitEntries[splitOrder[i]].Bounds); suffixBounds[i] = bounds; }
+        }
+
+        private bool FindLeaf(int nodeId, Aabb bounds, int itemId, List<int> path, List<int> pathEntries, out int leaf, out int index)
+        {
+            int offset = nodeId * maxNodeEntries;
+            for (int i = 0; i < nodes[nodeId].Count; i++)
+            {
+                TreeEntry entry = entries[offset + i];
+                if (nodes[nodeId].Level == 1)
+                {
+                    if (entry.Id == itemId && entry.Bounds.EqualsBounds(bounds)) { leaf = nodeId; index = i; return true; }
+                }
+                else if (entry.Bounds.Contains(bounds))
+                {
+                    path.Add(nodeId); pathEntries.Add(i);
+                    if (FindLeaf(entry.Id, bounds, itemId, path, pathEntries, out leaf, out index)) return true;
+                    path.RemoveAt(path.Count - 1); pathEntries.RemoveAt(pathEntries.Count - 1);
+                }
+            }
+            leaf = index = -1;
+            return false;
+        }
+
+        private void CollapseRoot()
+        {
+            while (nodes[rootNodeId].Level > 1 && nodes[rootNodeId].Count == 1)
+            {
+                int retired = rootNodeId;
+                rootNodeId = entries[retired * maxNodeEntries].Id;
+                ReleaseNode(retired);
+            }
+            if (nodes[rootNodeId].Count == 0) { nodes[rootNodeId].Level = 1; nodes[rootNodeId].Bounds = default(Aabb); }
+            treeHeight = nodes[rootNodeId].Level;
+        }
+
+        private void Pack(TreeEntry[] records)
+        {
+            // Called only on an unpublished builder (BulkLoad or Rebuild).
+            Array.Clear(nodes, 0, nodes.Length); Array.Clear(entries, 0, entries.Length);
+            freeNodeIds.Clear(); nextNodeId = 0;
+            if (records.Length == 0) { rootNodeId = AllocateNode(1); treeHeight = 1; return; }
+            int needed = 0, count = records.Length;
+            do { count = (count - 1) / maxNodeEntries + 1; needed = checked(needed + count); } while (count > 1);
+            EnsureNodeCapacity(needed);
+            int level = 1;
+            while (true)
+            {
+                int groups = (records.Length - 1) / maxNodeEntries + 1;
+                int[] groupSizes = new int[groups];
+                int basic = records.Length / groups, extra = records.Length % groups;
+                for (int i = 0; i < groups; i++) groupSizes[i] = basic + (i < extra ? 1 : 0);
+                OrderStr(records, groupSizes);
+                var parents = new TreeEntry[groups];
+                int cursor = 0;
+                for (int group = 0; group < groups; group++)
+                {
+                    int nodeId = AllocateNode(level);
+                    for (int i = 0; i < groupSizes[group]; i++) AddEntry(nodeId, records[cursor++]);
+                    parents[group] = new TreeEntry(nodes[nodeId].Bounds, nodeId);
+                }
+                if (groups == 1) { rootNodeId = parents[0].Id; treeHeight = level; return; }
+                records = parents; level++;
             }
         }
 
+        private static void OrderStr(TreeEntry[] records, int[] groupSizes)
+        {
+            if (groupSizes.Length <= 1) return;
+            // Constant axes carry no spatial ordering information. Excluding
+            // them prevents STR from partitioning line/plane data by arbitrary
+            // tie-breaking item IDs before reaching the varying coordinates.
+            double[] low = new double[3], high = new double[3], spread = new double[3];
+            int[] axes = new int[3];
+            for (int axis = 0; axis < 3; axis++) low[axis] = high[axis] = records[0].Bounds.Center(axis);
+            for (int i = 1; i < records.Length; i++)
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    double center = records[i].Bounds.Center(axis);
+                    low[axis] = Math.Min(low[axis], center);
+                    high[axis] = Math.Max(high[axis], center);
+                }
+            int dimensions = 0;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                spread[axis] = high[axis] - low[axis];
+                if (spread[axis] == 0) continue;
+                int insertion = dimensions;
+                while (insertion > 0 && spread[axes[insertion - 1]] < spread[axis])
+                {
+                    axes[insertion] = axes[insertion - 1];
+                    insertion--;
+                }
+                axes[insertion] = axis;
+                dimensions++;
+            }
+            if (dimensions != 0) OrderStrRange(records, groupSizes, 0, groupSizes.Length, 0, axes, 0, dimensions);
+        }
+
+        private static void OrderStrRange(TreeEntry[] records, int[] groupSizes, int firstGroup, int groups,
+            int entryStart, int[] axes, int axisIndex, int remainingDimensions)
+        {
+            if (groups <= 1) return;
+            int entryCount = Sum(groupSizes, firstGroup, groups);
+            int axis = axes[axisIndex];
+            Array.Sort(records, entryStart, entryCount, axis == 0 ? CenterComparer.X : axis == 1 ? CenterComparer.Y : CenterComparer.Z);
+            if (remainingDimensions == 1) return;
+            int slices = Math.Max(1, (int)Math.Ceiling(Math.Pow(groups, 1.0 / remainingDimensions)));
+            int groupStart = firstGroup;
+            for (int slice = 0; slice < slices; slice++)
+            {
+                int sliceGroups = groups / slices + (slice < groups % slices ? 1 : 0);
+                OrderStrRange(records, groupSizes, groupStart, sliceGroups, entryStart, axes, axisIndex + 1, remainingDimensions - 1);
+                entryStart += Sum(groupSizes, groupStart, sliceGroups);
+                groupStart += sliceGroups;
+            }
+        }
+
+        private static int Sum(int[] values, int start, int count)
+        {
+            int sum = 0;
+            for (int i = 0; i < count; i++) sum += values[start + i];
+            return sum;
+        }
+
+        private struct OrphanEntry
+        {
+            internal TreeEntry Entry;
+            internal int Level;
+            internal OrphanEntry(TreeEntry entry, int level) { Entry = entry; Level = level; }
+        }
+
+        private sealed class OrphanComparer : IComparer<OrphanEntry>
+        {
+            internal static readonly OrphanComparer Instance = new OrphanComparer();
+            public int Compare(OrphanEntry left, OrphanEntry right) { return right.Level.CompareTo(left.Level); }
+        }
+
+        private sealed class SplitComparer : IComparer<int>
+        {
+            private readonly TreeEntry[] source;
+            internal int Axis;
+            internal bool Upper;
+            internal SplitComparer(TreeEntry[] source) { this.source = source; }
+            public int Compare(int left, int right)
+            {
+                Aabb a = source[left].Bounds, b = source[right].Bounds;
+                int comparison = (Upper ? a.Max(Axis) : a.Min(Axis)).CompareTo(Upper ? b.Max(Axis) : b.Min(Axis));
+                if (comparison != 0) return comparison;
+                comparison = (Upper ? a.Min(Axis) : a.Max(Axis)).CompareTo(Upper ? b.Min(Axis) : b.Max(Axis));
+                return comparison != 0 ? comparison : left.CompareTo(right);
+            }
+        }
+
+        private sealed class CenterComparer : IComparer<TreeEntry>
+        {
+            internal static readonly CenterComparer X = new CenterComparer(0), Y = new CenterComparer(1), Z = new CenterComparer(2);
+            private readonly int axis;
+            private CenterComparer(int axis) { this.axis = axis; }
+            public int Compare(TreeEntry left, TreeEntry right)
+            {
+                int comparison = left.Bounds.Center(axis).CompareTo(right.Bounds.Center(axis));
+                if (comparison != 0) return comparison;
+                comparison = left.Bounds.Min(axis).CompareTo(right.Bounds.Min(axis));
+                return comparison != 0 ? comparison : left.Id.CompareTo(right.Id);
+            }
+        }
     }
 }

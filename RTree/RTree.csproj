@@ -38,12 +38,28 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="System" />
+    <Reference Include="System.Numerics" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Node.cs" />
     <Compile Include="Point.cs" />
     <Compile Include="Rectangle.cs" />
     <Compile Include="RTree.cs" />
+    <Compile Include="Aabb.cs" />
+    <Compile Include="QueryContext.cs" />
+    <Compile Include="RTree.Queries.cs" />
+    <Compile Include="SpatialGeometry.cs" />
+    <Compile Include="SpatialContracts.cs" />
+    <Compile Include="SpatialQueryExtensions.cs" />
+    <Compile Include="RTreeIndex.cs" />
+    <Compile Include="RTree.Spatial.cs" />
+    <Compile Include="DynamicAabbTree.cs" />
+    <Compile Include="StaticBvh.cs" />
+    <Compile Include="TriangleBvh.cs" />
+    <Compile Include="LooseOctree.cs" />
+    <Compile Include="KdTree.cs" />
+    <Compile Include="TriangleIntersection.cs" />
+    <Compile Include="TriangleExact.cs" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Properties\" />

@@ -1,0 +1,20 @@
+name: Correctness validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Run regression and randomized differential tests
+        run: dotnet run --project validation/Correctness/Correctness.csproj -c Release
+      - name: Validate spatial trees and exact queries
+        run: dotnet run --project validation/SpatialCorrectness/SpatialCorrectness.csproj -c Release
+      - name: Run public API demos against the .NET 8 library
+        run: dotnet run --project examples/SpatialQueries/SpatialQueries.csproj -c Release -- all
