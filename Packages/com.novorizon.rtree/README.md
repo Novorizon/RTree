@@ -14,11 +14,10 @@ Runtime/
   TriangleBvh/       # 三角形 BVH
   LooseOctree/       # 松散八叉树
   KdTree/            # KD 树
-  Grid/              # 独立格子索引归属；当前尚无算法实现
   RTree.asmdef
 ```
 
-各类结构分别归档，仍编入一个 RTree 程序集。命名空间、公开接口和已有源码 .meta GUID 保持不变。Grid 目录的说明不代表已经新增格子算法。
+各类结构分别归档，仍编入一个 RTree 程序集。命名空间、公开接口和已有源码 .meta GUID 保持不变。
 
 ## 安装
 
