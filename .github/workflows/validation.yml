@@ -16,3 +16,5 @@ jobs:
         run: dotnet run --project validation/Correctness/Correctness.csproj -c Release
       - name: Validate spatial trees and exact queries
         run: dotnet run --project validation/SpatialCorrectness/SpatialCorrectness.csproj -c Release
+      - name: Run public API demos against the .NET 8 library
+        run: dotnet run --project examples/SpatialQueries/SpatialQueries.csproj -c Release -- all

@@ -101,6 +101,12 @@ namespace RTree
             if (r == null) throw new ArgumentNullException("r");
             if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
             Aabb bounds = Aabb.FromRectangle(r);
+            AddValue(bounds, item);
+        }
+
+        internal void AddValue(Aabb bounds, T item)
+        {
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
             sync.EnterWriteLock();
             try
             {
@@ -129,6 +135,12 @@ namespace RTree
             if (r == null) throw new ArgumentNullException("r");
             if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
             Aabb bounds = Aabb.FromRectangle(r);
+            return DeleteValue(bounds, item);
+        }
+
+        internal bool DeleteValue(Aabb bounds, T item)
+        {
+            if (ReferenceEquals(item, null)) throw new ArgumentNullException("item");
             sync.EnterWriteLock();
             try
             {

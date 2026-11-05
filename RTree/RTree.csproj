@@ -50,6 +50,8 @@
     <Compile Include="RTree.Queries.cs" />
     <Compile Include="SpatialGeometry.cs" />
     <Compile Include="SpatialContracts.cs" />
+    <Compile Include="SpatialQueryExtensions.cs" />
+    <Compile Include="RTreeIndex.cs" />
     <Compile Include="RTree.Spatial.cs" />
     <Compile Include="DynamicAabbTree.cs" />
     <Compile Include="StaticBvh.cs" />

@@ -8,7 +8,7 @@ using RTree;
 
 // Deliberately uses separate, elementary brute-force geometry below. No query
 // oracle calls the library's intersection/distance helpers or a second index.
-internal static class Program
+internal static partial class Program
 {
     private static int assertions;
     private static bool quick;
@@ -31,6 +31,7 @@ internal static class Program
         Run("KD radius, k nearest, ties and rebuild", Points, ref failures);
         Run("concurrent reads and writers", ConcurrentQueries, ref failures);
         Run("warmed reusable queries allocate zero bytes", Allocations, ref failures);
+        Run("public mutable interfaces and RTreeIndex adapter", UserApiChecks, ref failures);
         Console.WriteLine("{0}: {1:N0} assertions, {2} failed groups, {3:F2}s ({4})",
             failures == 0 ? "PASS" : "FAIL", assertions, failures, total.Elapsed.TotalSeconds,
             quick ? "quick" : "full");
@@ -812,12 +813,12 @@ internal static class Program
     {
         List<Entry> data=Data(150,431,20);
         var dynamic=new DynamicAabbTree<int>();var octree=new LooseOctree<int>(new Box(-100,-100,-100,100,100,100).Bounds);
-        var rtree=new RTree.RTree<int>();
-        foreach(Entry e in data){dynamic.Insert(e.Box.Bounds,e.Item);octree.Insert(e.Box.Bounds,e.Item);rtree.Add(new Rectangle(e.Box.X0,e.Box.Y0,e.Box.X1,e.Box.Y1,e.Box.Z0,e.Box.Z1),e.Item);}
+        var rtree=new RTree.RTree<int>();var adapter=new RTreeIndex<int>();
+        foreach(Entry e in data){dynamic.Insert(e.Box.Bounds,e.Item);octree.Insert(e.Box.Bounds,e.Item);adapter.Insert(e.Box.Bounds,e.Item);rtree.Add(new Rectangle(e.Box.X0,e.Box.Y0,e.Box.X1,e.Box.Y1,e.Box.Z0,e.Box.Z1),e.Item);}
         var bvh=new StaticBvh<int>(BoxSource(data));
         var triangles=new TriangleBvh<int>(data.Select(e=>new KeyValuePair<Triangle3,int>(new Triangle3(V(e.Box.X0,e.Box.Y0,e.Box.Z0),V(e.Box.X1,e.Box.Y0,e.Box.Z1),V(e.Box.X0,e.Box.Y1,e.Box.Z1)),e.Item)).ToList());
         var query=new Box(-100,-100,-100,100,100,100).Bounds;
-        foreach(var entry in new (string,IBoundsQuery3<int>,IRayQuery3<int>)[]{("dynamic",dynamic,dynamic),("octree",octree,octree),("bvh",bvh,bvh),("triangle",triangles,triangles),("RTree",rtree,rtree)})
+        foreach(var entry in new (string,IBoundsQuery3<int>,IRayQuery3<int>)[]{("dynamic",dynamic,dynamic),("octree",octree,octree),("bvh",bvh,bvh),("triangle",triangles,triangles),("RTree",rtree,rtree),("RTreeIndex",adapter,adapter)})
         {
             var results=new List<int>(data.Count);var hits=new List<RayHit<int>>(data.Count);var context=new QueryContext();
             var sphere=new Sphere3(V(0,0,0),100);var frustum=Frustum(new Box(-100,-100,-100,100,100,100));var ray=new Ray3(V(-100,0,0),V(1,0,0));

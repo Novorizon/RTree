@@ -10,7 +10,7 @@ namespace RTree
     /// Queries test the actual bounds, rather than returning loose-cell hits.
     /// Concurrent readers are supported; a writer excludes readers.
     /// </summary>
-    public sealed class LooseOctree<T> : IBoundsQuery3<T>, IRayQuery3<T>
+    public sealed class LooseOctree<T> : IMutableBoundsIndex3<T>, IRayQuery3<T>
     {
         private const int SplitThreshold = 8;
 

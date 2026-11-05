@@ -1,9 +1,41 @@
 # RTree
 
-An in-memory, three-dimensional R-tree for axis-aligned boxes and unique items.
-The library preserves its existing public API and .NET Framework 4.5 project.
+In-memory 3D spatial indexes: RTree, dynamic AABB tree, static/triangle BVH,
+loose octree and point KD-tree. The library preserves its existing RTree public
+API and .NET Framework 4.5 project, and provides a .NET 8 library project.
 Its implementation uses managed arrays; it does not require unsafe code or
 native memory.
+
+## Start here
+
+[中文用户指南](docs/UserGuide.md) covers selection, common interfaces, entity
+lifecycle, skill targeting, broad phase, ray hits and point neighbors.
+[Runnable demos](examples/SpatialQueries/README.md) use the actual library project:
+
+```sh
+dotnet run --project examples/SpatialQueries/SpatialQueries.csproj -c Release -- all
+```
+
+New applications can depend on the handle-based mutable interface:
+
+```csharp
+using RTree;
+using System.Collections.Generic;
+
+IMutableBoundsIndex3<int> index = new RTreeIndex<int>();
+var handle = index.Insert(new Bounds3(0, 0, 0, 1, 2, 1), 1001);
+index.Move(handle, new Bounds3(4, 0, 0, 5, 2, 1));
+var results = new List<int>(128);
+index.QuerySphere(new Sphere3(new Vector3d(0, 0, 0), 10), results);
+index.Remove(handle);
+```
+
+`RTreeIndex`, `DynamicAabbTree` and `LooseOctree` share this lifecycle. Query-only
+code uses `IBoundsQuery3`; rays, point neighbors and broad-phase pairs have
+separate capability interfaces. Move reports structural reinsertion; false can
+still mean the real bounds were updated. Queries clear the caller's result list.
+
+## Original RTree API
 
 ```csharp
 var tree = new RTree.RTree<string>();

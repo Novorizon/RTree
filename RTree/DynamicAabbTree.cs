@@ -9,7 +9,7 @@ namespace RTree
     /// Leaves use expanded bounds to avoid reinsertion for small movements;
     /// queries and reported pairs always test the current, unexpanded bounds.
     /// </summary>
-    public sealed class DynamicAabbTree<T> : IBoundsQuery3<T>, IRayQuery3<T>
+    public sealed class DynamicAabbTree<T> : IBroadPhase3<T>, IRayQuery3<T>
     {
         // A little height slack permits spatial rotations that strict AVL
         // balance forbids, while still bounding adversarial insertion depth.

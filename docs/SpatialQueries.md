@@ -1,6 +1,8 @@
 # CPU 3D 查询索引
 
 本库提供四种补充索引，并为原 RTree 接入共同的 bounds 和 ray 接口。
+新用户从[用户指南](UserGuide.md)和[可运行 Demo](../examples/SpatialQueries/README.md)开始。
+`RTreeIndex<T>` 提供 Bounds3 和句柄生命周期，支持 IMutableBoundsIndex3；原 RTree API 继续兼容。
 所有实现使用 double 几何、托管连续数组和可复用查询上下文；GPU 用途见文末。
 
 | 类型 | 适用数据 | 更新接口 | 查询语义 |

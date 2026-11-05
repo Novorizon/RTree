@@ -13,6 +13,22 @@ namespace RTree
         int QueryFrustum(Frustum3 frustum, List<T> results, QueryContext context);
     }
 
+    /// <summary>Mutable object bounds identified by index-owned, generation-checked handles.</summary>
+    public interface IMutableBoundsIndex3<T> : IBoundsQuery3<T>
+    {
+        ProxyHandle Insert(Bounds3 bounds, T item);
+        /// <summary>Updates bounds; true means structural reinsertion, not success.</summary>
+        bool Move(ProxyHandle handle, Bounds3 bounds);
+        bool Remove(ProxyHandle handle);
+        bool TryGetBounds(ProxyHandle handle, out Bounds3 bounds);
+    }
+
+    /// <summary>Unique unordered pairs whose current real AABBs overlap, before narrow phase.</summary>
+    public interface IBroadPhase3<T> : IMutableBoundsIndex3<T>
+    {
+        int QueryPairs(List<ProxyPair<T>> results, QueryContext context);
+    }
+
     /// <summary>
     /// Ray parameters use the supplied direction, without normalization.
     /// Box indexes return box hits; TriangleBvh returns exact triangle hits.
@@ -58,6 +74,7 @@ namespace RTree
         public readonly long Owner;
         internal ProxyHandle(int slot, long generation, long owner)
         { Slot = slot; Generation = generation; Owner = owner; }
+        /// <summary>Checks handle format only. Use TryGetBounds to check whether it is still live.</summary>
         public bool IsValid { get { return Owner > 0 && Slot >= 0 && Generation > 0; } }
         public bool Equals(ProxyHandle other)
         { return Slot == other.Slot && Generation == other.Generation && Owner == other.Owner; }
